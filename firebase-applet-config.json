@@ -1,0 +1,11 @@
+{
+  "projectId": "health-37caa",
+  "appId": "1:176669098529:web:dc925a6a66560bcd749960",
+  "apiKey": "AIzaSyAnQOF5PLxh-Q3ffG0QqmLn9uxW1VDHOFw",
+  "authDomain": "health-37caa.firebaseapp.com",
+  "databaseURL": "https://health-37caa-default-rtdb.firebaseio.com",
+  "storageBucket": "health-37caa.firebasestorage.app",
+  "messagingSenderId": "176669098529",
+  "measurementId": "",
+  "firestoreDatabaseId": "(default)"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Medicare Health Triage AI Assistant",
+  "description": "A comprehensive clinic receptionist module featuring patient check-in, QR scanning, and queue management.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": []
+}

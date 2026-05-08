@@ -1,0 +1,89 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global helpers
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // User Role Helpers
+    function getUserData(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data;
+    }
+    
+    function isRole(role) {
+      return isSignedIn() && getUserData(request.auth.uid).role == role;
+    }
+
+    function isReceptionist() { return isRole('receptionist'); }
+    
+    // Access checks for Receptionist
+    function belongsToClinic(clinicId) {
+      return isSignedIn() && getUserData(request.auth.uid).clinicId == clinicId;
+    }
+
+    // Receptionist assigned doctor check
+    function isAssignedDoctor(clinicId, doctorId) {
+      let recPath = /databases/$(database)/documents/clinics/$(clinicId)/receptionists/$(request.auth.uid);
+      return exists(recPath) && doctorId in get(recPath).data.assignedDoctorIds;
+    }
+
+    // Validation helpers
+    function isValidUser(data) {
+      return data.uid is string && data.email is string && data.role in ['receptionist', 'doctor', 'admin', 'patient'];
+    }
+
+    function isValidAppointment(data) {
+      return data.patientId is string && data.doctorId is string && data.date is string && data.status is string;
+    }
+
+    // Rules
+    match /users/{userId} {
+      allow read: if isSignedIn() && (request.auth.uid == userId || isReceptionist());
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidUser(incoming());
+      allow update: if isSignedIn() && request.auth.uid == userId && incoming().role == existing().role;
+    }
+
+    match /appointments/{appointmentId} {
+      allow read: if isSignedIn() && (belongsToClinic(resource.data.clinicId) || resource.data.patientId == request.auth.uid);
+      allow create: if isSignedIn() && belongsToClinic(incoming().clinicId) && isValidAppointment(incoming());
+      allow update: if isSignedIn() && (
+        (belongsToClinic(existing().clinicId) && isReceptionist()) || 
+        (existing().patientId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status']))
+      );
+    }
+
+    match /clinics/{clinicId} {
+      allow read: if isSignedIn() && belongsToClinic(clinicId);
+      
+      match /receptionists/{receptionistId} {
+        allow read: if isSignedIn() && belongsToClinic(clinicId) && (request.auth.uid == receptionistId || isReceptionist());
+        allow update: if isSignedIn() && request.auth.uid == receptionistId && belongsToClinic(clinicId) && 
+                      incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'phone', 'gender', 'profileImageUrl', 'address', 'updatedAt']);
+      }
+
+      match /doctors/{doctorId} {
+        allow read: if isSignedIn() && belongsToClinic(clinicId);
+      }
+
+      match /appointments/{appointmentId} {
+        allow read: if isSignedIn() && belongsToClinic(clinicId) && (isReceptionist() || existing().patientId == request.auth.uid);
+        allow create: if isSignedIn() && belongsToClinic(clinicId) && isValidAppointment(incoming());
+        allow update: if isSignedIn() && belongsToClinic(clinicId) && isReceptionist() && 
+                      isAssignedDoctor(clinicId, incoming().doctorId) &&
+                      isValidAppointment(incoming());
+      }
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && existing().userId == request.auth.uid;
+      allow update: if isSignedIn() && existing().userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['isRead']);
+    }
+  }
+}

@@ -1,0 +1,137 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Base user profile across the system",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["receptionist", "doctor", "admin", "patient"] },
+        "clinicId": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "profileCompleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role", "status"]
+    },
+    "Clinic": {
+      "title": "Clinic",
+      "description": "Healthcare facility information",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "address": { "type": "string" },
+        "phone": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name"]
+    },
+    "Receptionist": {
+      "title": "Receptionist",
+      "description": "Receptionist-specific data within a clinic",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "clinicId": { "type": "string" },
+        "fullName": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "gender": { "type": "string" },
+        "shift": { "type": "string" },
+        "profileImageUrl": { "type": "string" },
+        "assignedDoctorIds": { "type": "array", "items": { "type": "string" } },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "clinicId", "fullName", "email"]
+    },
+    "Doctor": {
+      "title": "Doctor",
+      "description": "Doctor profile within a clinic",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "fullName": { "type": "string" },
+        "specialization": { "type": "string" },
+        "roomNumber": { "type": "string" },
+        "status": { "type": "string" },
+        "profileImageUrl": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "Appointment": {
+      "title": "Appointment",
+      "description": "Service booking record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "patientId": { "type": "string" },
+        "patientName": { "type": "string" },
+        "patientPhone": { "type": "string" },
+        "doctorId": { "type": "string" },
+        "doctorName": { "type": "string" },
+        "clinicId": { "type": "string" },
+        "date": { "type": "string" },
+        "slotStartTime": { "type": "string" },
+        "slotEndTime": { "type": "string" },
+        "appointmentKey": { "type": "string" },
+        "status": { "type": "string" },
+        "qrVerified": { "type": "boolean" },
+        "verificationToken": { "type": "string" },
+        "queueNumber": { "type": "number" },
+        "checkedInAt": { "type": "string", "format": "date-time" },
+        "checkedInBy": { "type": "string" },
+        "rejectionReason": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["patientId", "doctorId", "date", "status"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "System alerts for users",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "role": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "type": { "type": "string" },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": "User",
+      "description": "Main user records"
+    },
+    "clinics/{clinicId}": {
+      "schema": "Clinic",
+      "description": "Clinic records"
+    },
+    "clinics/{clinicId}/receptionists/{receptionistId}": {
+      "schema": "Receptionist",
+      "description": "Receptionists belonging to a clinic"
+    },
+    "clinics/{clinicId}/doctors/{doctorId}": {
+      "schema": "Doctor",
+      "description": "Doctors belonging to a clinic"
+    },
+    "clinics/{clinicId}/appointments/{appointmentId}": {
+      "schema": "Appointment",
+      "description": "Clinic appointments"
+    },
+    "appointments/{appointmentId}": {
+      "schema": "Appointment",
+      "description": "Cross-clinic appointments or primary appointment store"
+    },
+    "notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "System-wide notifications"
+    }
+  }
+}
