@@ -23,21 +23,29 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let unsub: (() => void) | undefined;
+
     if (profile) {
       setLoading(true);
       getReceptionistProfile(profile.clinicId, profile.uid).then(rec => {
         if (rec) {
-          const unsub = getAppointmentsByDate(profile.clinicId, today, rec.assignedDoctorIds, (data) => {
+          unsub = getAppointmentsByDate(profile.clinicId, today, rec.assignedDoctorIds, (data) => {
             // Only show patients who are in the clinic (confirmed, checked in, waiting, called, in consultation)
             const queueStatuses: AppointmentStatus[] = ['confirmed', 'checked_in', 'waiting', 'called', 'in_consultation'];
             const inQueue = data.filter(a => queueStatuses.includes(a.status));
             setAppointments(inQueue.sort((a, b) => (a.queueNumber || 0) - (b.queueNumber || 0)));
             setLoading(false);
           });
-          return unsub;
+        } else {
+          setAppointments([]);
+          setLoading(false);
         }
       });
     }
+
+    return () => {
+      if (unsub) unsub();
+    };
   }, [profile, today]);
 
   const handleStatusUpdate = async (id: string, status: AppointmentStatus) => {

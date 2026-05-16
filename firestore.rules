@@ -72,6 +72,11 @@ service cloud.firestore {
         allow read: if isSignedIn() && belongsToClinic(clinicId);
       }
 
+      match /doctorQueues/{queueDocId} {
+        allow read: if isSignedIn() && belongsToClinic(clinicId);
+        allow create, update: if isSignedIn() && belongsToClinic(clinicId) && isReceptionist();
+      }
+
       match /appointments/{appointmentId} {
         allow read: if isSignedIn() && belongsToClinic(clinicId) && (isReceptionist() || existing().patientId == request.auth.uid);
         allow create: if isSignedIn() && belongsToClinic(clinicId) && isValidAppointment(incoming());
