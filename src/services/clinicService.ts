@@ -8,17 +8,65 @@ import {
   updateDoc, 
   serverTimestamp,
   runTransaction,
-  onSnapshot
+  onSnapshot,
+  limit
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { handleFirestoreError, OperationType } from '../lib/firestoreErrorHandler';
 import { Appointment, DoctorProfile, ReceptionistProfile } from '../types';
 
+const normalizeDoctorIds = (data: any): string[] => {
+  const source = Array.isArray(data?.linked_doctor_ids)
+    ? data.linked_doctor_ids
+    : Array.isArray(data?.assignedDoctorIds)
+      ? data.assignedDoctorIds
+      : Array.isArray(data?.linkedDoctorIds)
+        ? data.linkedDoctorIds
+        : [];
+
+  return source.map(String).map((id) => id.trim()).filter(Boolean);
+};
+
+const normalizeReceptionistProfile = (
+  data: Record<string, any>,
+  fallbackUid: string,
+  clinicId: string
+): ReceptionistProfile => ({
+  ...(data as ReceptionistProfile),
+  uid:
+    typeof data?.firebaseUid === 'string' && data.firebaseUid.trim()
+      ? data.firebaseUid.trim()
+      : fallbackUid,
+  clinicId:
+    typeof data?.clinicId === 'string' && data.clinicId.trim()
+      ? data.clinicId.trim()
+      : clinicId,
+  assignedDoctorIds: normalizeDoctorIds(data)
+});
+
 export const getReceptionistProfile = async (clinicId: string, uid: string): Promise<ReceptionistProfile | null> => {
   const path = `clinics/${clinicId}/receptionists/${uid}`;
   try {
-    const docSnap = await getDoc(doc(db, path));
-    return docSnap.exists() ? (docSnap.data() as ReceptionistProfile) : null;
+    const directDoc = await getDoc(doc(db, path));
+    if (directDoc.exists()) {
+      return normalizeReceptionistProfile(directDoc.data() as Record<string, any>, uid, clinicId);
+    }
+
+    const fallbackQuery = query(
+      collection(db, `clinics/${clinicId}/receptionists`),
+      where('firebaseUid', '==', uid),
+      limit(1)
+    );
+    const fallbackSnapshot = await getDocs(fallbackQuery);
+    if (!fallbackSnapshot.empty) {
+      return normalizeReceptionistProfile(
+        fallbackSnapshot.docs[0].data() as Record<string, any>,
+        uid,
+        clinicId
+      );
+    }
+
+    return null;
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, path);
     return null;

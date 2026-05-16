@@ -2,12 +2,14 @@ export type UserRole = 'receptionist' | 'doctor' | 'admin' | 'patient';
 
 export interface UserProfile {
   uid: string;
+  firebaseUid?: string;
   email: string;
   role: UserRole;
   clinicId: string;
   status: 'active' | 'inactive';
   profileCompleted: boolean;
   createdAt: any;
+  assignedDoctorIds?: string[];
 }
 
 export interface ReceptionistProfile {

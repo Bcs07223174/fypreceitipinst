@@ -5,89 +5,141 @@ import {
   onAuthStateChanged,
   User as FirebaseUser
 } from 'firebase/auth';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, collectionGroup, doc, getDoc, getDocs, limit, query, where } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase';
 import { UserProfile } from '../types';
 
 const googleProvider = new GoogleAuthProvider();
 
+const PROFILE_NOT_FOUND_ERROR =
+  'Receptionist profile not found. Please ask admin to create and link your account.';
+
+const normalizeDoctorIds = (data: any): string[] => {
+  const source = Array.isArray(data?.linked_doctor_ids)
+    ? data.linked_doctor_ids
+    : Array.isArray(data?.assignedDoctorIds)
+      ? data.assignedDoctorIds
+      : Array.isArray(data?.linkedDoctorIds)
+        ? data.linkedDoctorIds
+        : [];
+
+  return source.map(String).map((id) => id.trim()).filter(Boolean);
+};
+
+type ResolvedReceptionist = {
+  profile: UserProfile;
+  userProfile: Record<string, any> | null;
+  receptionistData: Record<string, any>;
+  path: string;
+  clinicId: string;
+  normalizedAssignedDoctorIds: string[];
+};
+
+const resolveReceptionistProfile = async (
+  uid: string,
+  emailFallback: string
+): Promise<ResolvedReceptionist | null> => {
+  const userDoc = await getDoc(doc(db, 'users', uid));
+  const userProfile = userDoc.exists() ? (userDoc.data() as Record<string, any>) : null;
+  console.log('users/{uid} profile:', userProfile);
+
+  const userClinicId =
+    typeof userProfile?.clinicId === 'string' && userProfile.clinicId.trim()
+      ? userProfile.clinicId.trim()
+      : '';
+
+  let receptionistData: Record<string, any> | null = null;
+  let clinicId = userClinicId;
+  let path = '';
+
+  if (clinicId) {
+    path = `clinics/${clinicId}/receptionists/${uid}`;
+    const directDoc = await getDoc(doc(db, path));
+    if (directDoc.exists()) {
+      receptionistData = directDoc.data() as Record<string, any>;
+    } else {
+      const fallbackQuery = query(
+        collection(db, `clinics/${clinicId}/receptionists`),
+        where('firebaseUid', '==', uid),
+        limit(1)
+      );
+      const fallbackSnapshot = await getDocs(fallbackQuery);
+      if (!fallbackSnapshot.empty) {
+        const fallbackDoc = fallbackSnapshot.docs[0];
+        receptionistData = fallbackDoc.data() as Record<string, any>;
+        path = fallbackDoc.ref.path;
+      }
+    }
+  }
+
+  if (!receptionistData) {
+    try {
+      const groupQuery = query(
+        collectionGroup(db, 'receptionists'),
+        where('firebaseUid', '==', uid),
+        limit(1)
+      );
+      const groupSnapshot = await getDocs(groupQuery);
+      if (!groupSnapshot.empty) {
+        const groupDoc = groupSnapshot.docs[0];
+        receptionistData = groupDoc.data() as Record<string, any>;
+        clinicId = groupDoc.ref.parent.parent?.id || clinicId;
+        path = groupDoc.ref.path;
+      }
+    } catch (error) {
+      console.warn('collectionGroup lookup for receptionists failed:', error);
+    }
+  }
+
+  if (!receptionistData || !clinicId) {
+    return null;
+  }
+
+  const normalizedAssignedDoctorIds = normalizeDoctorIds(receptionistData);
+  const resolvedProfile: UserProfile = {
+    uid,
+    firebaseUid: typeof receptionistData.firebaseUid === 'string' && receptionistData.firebaseUid.trim()
+      ? receptionistData.firebaseUid.trim()
+      : uid,
+    email:
+      typeof receptionistData.email === 'string' && receptionistData.email.trim()
+        ? receptionistData.email.trim()
+        : emailFallback,
+    role: (receptionistData.role || userProfile?.role || 'receptionist') as UserProfile['role'],
+    clinicId,
+    status: (receptionistData.status || userProfile?.status || 'active') as UserProfile['status'],
+    profileCompleted: Boolean(userProfile?.profileCompleted ?? true),
+    createdAt: receptionistData.createdAt || userProfile?.createdAt || null,
+    assignedDoctorIds: normalizedAssignedDoctorIds
+  };
+
+  return {
+    profile: resolvedProfile,
+    userProfile,
+    receptionistData,
+    path,
+    clinicId,
+    normalizedAssignedDoctorIds
+  };
+};
+
 export const loginWithGoogle = async () => {
   const result = await signInWithPopup(auth, googleProvider);
   const user = result.user;
-  
-  // Check if user profile exists in Firestore
-  const userDoc = await getDoc(doc(db, 'users', user.uid));
-  const existingData = userDoc.data() as UserProfile | undefined;
-  
-  if (!userDoc.exists() || !existingData?.clinicId) {
-    // For this demo, we'll auto-create/update a receptionist profile if it doesn't exist or is missing clinicId
-    // In a real app, admin would create this
-    const newUser: UserProfile = {
-      uid: user.uid,
-      email: user.email || '',
-      role: 'receptionist',
-      clinicId: 'demo-clinic-1',
-      status: 'active',
-      profileCompleted: false,
-      createdAt: serverTimestamp()
-    };
-    await setDoc(doc(db, 'users', user.uid), newUser);
-    
-    // Seed some demo doctors to the clinic if it's a new setup
-    const doctor1Id = 'doc-1';
-    const doctor2Id = 'doc-2';
-    
-    await setDoc(doc(db, 'clinics', 'demo-clinic-1', 'doctors', doctor1Id), {
-      uid: doctor1Id,
-      fullName: 'Dr. Ahmad Khan',
-      specialization: 'Cardiologist',
-      roomNumber: 'Room 101',
-      status: 'active',
-      createdAt: serverTimestamp()
-    });
-    
-    await setDoc(doc(db, 'clinics', 'demo-clinic-1', 'doctors', doctor2Id), {
-      uid: doctor2Id,
-      fullName: 'Dr. Sarah Smith',
-      specialization: 'Pediatrician',
-      roomNumber: 'Room 203',
-      status: 'active',
-      createdAt: serverTimestamp()
-    });
 
-    // Also create the receptionist record under the clinic
-    await setDoc(doc(db, 'clinics', 'demo-clinic-1', 'receptionists', user.uid), {
-      uid: user.uid,
-      clinicId: 'demo-clinic-1',
-      fullName: user.displayName || 'Demo Receptionist',
-      email: user.email || '',
-      assignedDoctorIds: [doctor1Id, doctor2Id], // Auto-assign these doctors
-      status: 'active',
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
+  console.log('Auth UID:', user.uid);
+  const resolved = await resolveReceptionistProfile(user.uid, user.email || '');
 
-    // Seed one demo appointment for today
-    const appointmentId = 'demo-apt-1';
-    const today = new Date().toISOString().split('T')[0];
-    await setDoc(doc(db, 'appointments', appointmentId), {
-      id: appointmentId,
-      patientId: 'demo-patient-1',
-      patientName: 'Ali Jawad (Demo)',
-      patientPhone: '+92 300 1234567',
-      doctorId: doctor1Id,
-      doctorName: 'Dr. Ahmad Khan',
-      clinicId: 'demo-clinic-1',
-      date: today,
-      slotStartTime: '09:00 AM',
-      slotEndTime: '09:15 AM',
-      status: 'pending', // Change from confirmed to pending so it shows up
-      qrVerified: false,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
+  if (!resolved) {
+    await signOut(auth);
+    throw new Error(PROFILE_NOT_FOUND_ERROR);
   }
-  
+
+  console.log('Resolved receptionist path:', resolved.path);
+  console.log('Raw receptionist data:', resolved.receptionistData);
+  console.log('linked_doctor_ids count:', resolved.receptionistData?.linked_doctor_ids?.length);
+  console.log('normalized assignedDoctorIds count:', resolved.normalizedAssignedDoctorIds.length);
+
   return user;
 };
 
@@ -98,6 +150,16 @@ export const observeAuth = (callback: (user: FirebaseUser | null) => void) => {
 };
 
 export const getUserProfile = async (uid: string): Promise<UserProfile | null> => {
-  const userDoc = await getDoc(doc(db, 'users', uid));
-  return userDoc.exists() ? (userDoc.data() as UserProfile) : null;
+  const resolved = await resolveReceptionistProfile(uid, auth.currentUser?.email || '');
+
+  if (!resolved) {
+    return null;
+  }
+
+  console.log('Resolved receptionist path:', resolved.path);
+  console.log('Raw receptionist data:', resolved.receptionistData);
+  console.log('linked_doctor_ids count:', resolved.receptionistData?.linked_doctor_ids?.length);
+  console.log('normalized assignedDoctorIds count:', resolved.normalizedAssignedDoctorIds.length);
+
+  return resolved.profile;
 };
