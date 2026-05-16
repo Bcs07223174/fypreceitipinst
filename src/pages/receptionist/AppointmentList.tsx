@@ -24,22 +24,62 @@ export default function AppointmentList({ profile }: AppointmentListProps) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let unsub: (() => void) | undefined;
+    let isMounted = true;
 
-    if (profile) {
-      setLoading(true);
-      getReceptionistProfile(profile.clinicId, profile.uid).then(rec => {
-        const docIds = rec?.assignedDoctorIds || [];
-        unsub = getAppointmentsByDate(profile.clinicId, date, docIds, (data) => {
-          setAppointments(data);
-          setLoading(false);
-        });
-      });
+    if (!profile) {
+      setAppointments([]);
+      setError(null);
+      setLoading(false);
+      return;
     }
 
+    setLoading(true);
+    setError(null);
+    setAppointments([]);
+
+    (async () => {
+      try {
+        const rec = await getReceptionistProfile(profile.clinicId, profile.uid);
+        if (!isMounted) return;
+
+        if (!rec) {
+          setAppointments([]);
+          setError('Unable to load receptionist profile.');
+          setLoading(false);
+          return;
+        }
+
+        const docIds = rec.assignedDoctorIds || [];
+        unsub = getAppointmentsByDate(
+          profile.clinicId,
+          date,
+          docIds,
+          (data) => {
+            if (!isMounted) return;
+            setAppointments(data);
+            setLoading(false);
+          },
+          (message) => {
+            if (!isMounted) return;
+            setError(message);
+            setLoading(false);
+          }
+        );
+      } catch (err) {
+        console.error(err);
+        if (!isMounted) return;
+        setAppointments([]);
+        setError('Failed to load appointments.');
+        setLoading(false);
+      }
+    })();
+
     return () => {
+      isMounted = false;
       if (unsub) unsub();
     };
   }, [profile, date]);
@@ -109,6 +149,11 @@ export default function AppointmentList({ profile }: AppointmentListProps) {
 
       {/* Table */}
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        {error && (
+          <div className="border-b border-red-100 bg-red-50 px-6 py-3 text-sm font-medium text-red-700">
+            {error}
+          </div>
+        )}
         <div className="overflow-x-auto">
           <table className="w-full text-left">
             <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
@@ -122,6 +167,16 @@ export default function AppointmentList({ profile }: AppointmentListProps) {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
+              {loading && (
+                <tr>
+                  <td colSpan={6} className="py-20 text-center">
+                    <div className="flex flex-col items-center gap-2 text-slate-400">
+                      <Calendar size={32} className="opacity-30 animate-pulse" />
+                      <p className="text-sm font-medium">Loading appointments...</p>
+                    </div>
+                  </td>
+                </tr>
+              )}
               {filteredAppointments.map((app) => (
                 <tr key={app.id} className="group hover:bg-slate-50/50">
                   <td className="px-6 py-4">

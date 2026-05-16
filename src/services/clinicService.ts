@@ -42,7 +42,8 @@ export const getAppointmentsByDate = (
   clinicId: string, 
   date: string, 
   doctorIds: string[], 
-  callback: (appointments: Appointment[]) => void
+  callback: (appointments: Appointment[]) => void,
+  onError?: (message: string) => void
 ) => {
   if (!clinicId || !date) {
     console.warn("getAppointmentsByDate called with missing clinicId or date:", { clinicId, date });
@@ -71,6 +72,8 @@ export const getAppointmentsByDate = (
     callback(appointments);
   }, (error) => {
     handleFirestoreError(error, OperationType.LIST, path);
+    callback([]);
+    onError?.('Unable to load appointments right now. Please try again.');
   });
 };
 
