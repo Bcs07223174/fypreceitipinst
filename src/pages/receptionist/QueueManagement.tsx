@@ -37,6 +37,7 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
             setLoading(false);
           });
         } else {
+          console.warn('No receptionist profile found for authenticated user', { uid: profile.uid, clinicId: profile.clinicId });
           setAppointments([]);
           setLoading(false);
         }

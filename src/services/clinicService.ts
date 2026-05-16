@@ -57,6 +57,7 @@ export const getAppointmentsByDate = (
     return () => {};
   }
   const path = `appointments`;
+  // Requires a Firestore composite index for appointments on (clinicId ASC, date ASC).
   const q = query(
     collection(db, path), 
     where('clinicId', '==', clinicId),
