@@ -20,12 +20,22 @@ export const loginWithGoogle = async () => {
 
   if (!userDoc.exists() || !existingData) {
     await signOut(auth);
-    throw new Error('Access denied: user profile not provisioned by admin.');
+    throw new Error('Access denied: your account has not been set up. Please contact your clinic administrator.');
   }
 
-  if (existingData.role !== 'receptionist' || !existingData.clinicId || existingData.status !== 'active') {
+  if (existingData.role !== 'receptionist') {
     await signOut(auth);
-    throw new Error('Access denied: receptionist account is not active or not assigned to a clinic.');
+    throw new Error('Access denied: only receptionist accounts can use this portal.');
+  }
+
+  if (!existingData.clinicId) {
+    await signOut(auth);
+    throw new Error('Access denied: your account is not assigned to a clinic. Please contact your administrator.');
+  }
+
+  if (existingData.status !== 'active') {
+    await signOut(auth);
+    throw new Error('Access denied: your account is inactive. Please contact your administrator.');
   }
   
   return user;
