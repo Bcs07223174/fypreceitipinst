@@ -57,7 +57,7 @@ export const getAppointmentsByDate = (
     return () => {};
   }
   const path = `appointments`;
-  // Requires a Firestore composite index on appointments with clinicId (equality) and date (equality).
+  // Requires a Firestore composite index on appointments covering both clinicId and date.
   const q = query(
     collection(db, path), 
     where('clinicId', '==', clinicId),

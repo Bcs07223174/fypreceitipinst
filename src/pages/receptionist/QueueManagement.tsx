@@ -37,7 +37,7 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
             setLoading(false);
           });
         } else {
-          console.warn('No receptionist profile found for authenticated user.');
+          console.warn('No receptionist profile found for authenticated user. Verify Firestore setup or contact an administrator.');
           setAppointments([]);
           setLoading(false);
         }
