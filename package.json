@@ -8,7 +8,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "perf:load": "node scripts/perf/load-test.mjs",
+    "perf:stress": "node scripts/perf/stress-test.mjs",
+    "perf:all": "npm run perf:load && npm run perf:stress"
   },
   "dependencies": {
     "@babel/runtime": "^7.29.2",
