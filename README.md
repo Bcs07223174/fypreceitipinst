@@ -15,6 +15,18 @@ View your app in AI Studio: https://ai.studio/apps/21ad98fc-bbe8-41b4-a589-2d155
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. Run the app:
    `npm run dev`
+
+## Load and stress testing
+
+1. Start the app:
+   `npm run dev`
+2. In another terminal, run:
+   - Load test: `npm run perf:load`
+   - Stress test: `npm run perf:stress`
+
+By default tests run against `http://127.0.0.1:3000`.  
+To target another URL, set `PERF_TARGET_URL`, for example:
+
+`PERF_TARGET_URL=http://127.0.0.1:4173 npm run perf:all`

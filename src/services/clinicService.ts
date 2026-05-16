@@ -29,9 +29,16 @@ export const getAssignedDoctors = async (clinicId: string, doctorIds: string[]):
   if (doctorIds.length === 0) return [];
   const path = `clinics/${clinicId}/doctors`;
   try {
-    const q = query(collection(db, path), where('uid', 'in', doctorIds));
-    const querySnapshot = await getDocs(q);
-    return querySnapshot.docs.map(doc => doc.data() as DoctorProfile);
+    const chunks: string[][] = [];
+    for (let i = 0; i < doctorIds.length; i += 10) {
+      chunks.push(doctorIds.slice(i, i + 10));
+    }
+
+    const snapshots = await Promise.all(
+      chunks.map((chunk) => getDocs(query(collection(db, path), where('uid', 'in', chunk))))
+    );
+
+    return snapshots.flatMap((querySnapshot) => querySnapshot.docs.map((docSnap) => docSnap.data() as DoctorProfile));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, path);
     return [];
@@ -50,20 +57,16 @@ export const getAppointmentsByDate = (
     return () => {};
   }
   const path = `appointments`;
-  // Simplify query to just clinicId and date to avoid common index issues
-  // Doctor filtering will be done locally
+  // Requires a Firestore composite index on appointments covering both clinicId and date.
   const q = query(
     collection(db, path), 
-    where('clinicId', '==', clinicId)
+    where('clinicId', '==', clinicId),
+    where('date', '==', date)
   );
   
   return onSnapshot(q, (snapshot) => {
     let appointments = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Appointment));
-    
-    // Filter by date locally to avoid composite index requirement
-    appointments = appointments.filter(app => app.date === date);
-    
-    // Filter by assigned doctors locally if any are assigned
+
     if (doctorIds.length > 0) {
       appointments = appointments.filter(app => doctorIds.includes(app.doctorId));
     }

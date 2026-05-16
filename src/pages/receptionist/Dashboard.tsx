@@ -43,10 +43,10 @@ export default function Dashboard({ profile }: DashboardProps) {
   }, [profile, today]);
 
   const stats = [
-    { label: 'Total Appointments', value: appointments.length, icon: Calendar, color: 'sky' },
-    { label: 'Waiting List', value: appointments.filter(a => ['confirmed', 'checked_in'].includes(a.status)).length, icon: Clock, color: 'orange' },
-    { label: 'Completed', value: appointments.filter(a => a.status === 'completed').length, icon: CheckCircle2, color: 'green' },
-    { label: 'Cancelled', value: appointments.filter(a => a.status === 'cancelled').length, icon: AlertCircle, color: 'red' },
+    { label: 'Total Appointments', value: appointments.length, icon: Calendar, colorClass: 'bg-sky-50 text-sky-600' },
+    { label: 'Waiting List', value: appointments.filter(a => ['confirmed', 'checked_in'].includes(a.status)).length, icon: Clock, colorClass: 'bg-orange-50 text-orange-600' },
+    { label: 'Completed', value: appointments.filter(a => a.status === 'completed').length, icon: CheckCircle2, colorClass: 'bg-green-50 text-green-600' },
+    { label: 'Cancelled', value: appointments.filter(a => a.status === 'cancelled').length, icon: AlertCircle, colorClass: 'bg-red-50 text-red-600' },
   ];
 
   return (
@@ -69,7 +69,7 @@ export default function Dashboard({ profile }: DashboardProps) {
                 <p className="text-sm font-medium text-slate-500">{stat.label}</p>
                 <p className="mt-1 text-3xl font-bold text-slate-900">{stat.value}</p>
               </div>
-              <div className={`rounded-xl bg-${stat.color}-50 p-3 text-${stat.color}-600`}>
+              <div className={`rounded-xl p-3 ${stat.colorClass}`}>
                 <stat.icon size={24} />
               </div>
             </div>
