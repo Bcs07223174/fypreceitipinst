@@ -1,0 +1,10 @@
+@import "../styles/globals.css";
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+}

@@ -9,8 +9,8 @@ import {
   Search,
   ArrowRight
 } from 'lucide-react';
-import { UserProfile, Appointment, ReceptionistProfile, AppointmentStatus } from '../../types';
-import { getReceptionistProfile, getAppointmentsByDate, updateAppointmentStatus } from '../../services/clinicService';
+import { UserProfile, Appointment, AppointmentStatus } from '../../types';
+import { listenToClinicPatientQueue, updateAppointmentStatus } from '../../services/clinicService';
 import { format } from 'date-fns';
 
 interface QueueManagementProps {
@@ -21,28 +21,70 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const today = format(new Date(), 'yyyy-MM-dd');
   const [loading, setLoading] = useState(true);
+  const [doctorFilter, setDoctorFilter] = useState('all');
+  const [doctorSearch, setDoctorSearch] = useState('');
 
   useEffect(() => {
-    if (profile) {
-      setLoading(true);
-      getReceptionistProfile(profile.clinicId, profile.uid).then(rec => {
-        if (rec) {
-          const unsub = getAppointmentsByDate(profile.clinicId, today, rec.assignedDoctorIds, (data) => {
-            // Only show patients who are in the clinic (confirmed, checked in, waiting, called, in consultation)
-            const queueStatuses: AppointmentStatus[] = ['confirmed', 'checked_in', 'waiting', 'called', 'in_consultation'];
-            const inQueue = data.filter(a => queueStatuses.includes(a.status));
-            setAppointments(inQueue.sort((a, b) => (a.queueNumber || 0) - (b.queueNumber || 0)));
-            setLoading(false);
-          });
-          return unsub;
-        }
-      });
-    }
-  }, [profile, today]);
+    let unsub: (() => void) | undefined;
+    let isActive = true;
 
-  const handleStatusUpdate = async (id: string, status: AppointmentStatus) => {
+    const setup = async () => {
+      if (!profile) return;
+
+      setLoading(true);
+      unsub = listenToClinicPatientQueue(profile.clinicId, 'all', today, (data) => {
+        if (!isActive) return;
+
+        const queueAppointments = data.map((item) => ({
+          id: item.appointmentId,
+          patientId: item.patientId || '',
+          patientName: item.patientName || '',
+          patientPhone: item.patientPhone || '',
+          doctorId: item.doctorId || '',
+          doctorName: item.doctorName || '',
+          clinicId: profile.clinicId,
+          date: item.date || today,
+          appointmentDate: item.appointmentDate || item.date || today,
+          appointmentTime: item.appointmentTime || item.slotStartTime || item.slot || '',
+          slotStartTime: item.slotStartTime || item.appointmentTime || '',
+          slotEndTime: item.slotEndTime || item.appointmentTime || '',
+          appointmentKey: item.appointmentKey,
+          status: (item.status || 'confirmed') as AppointmentStatus,
+          paymentStatus: item.paymentStatus || 'pending',
+          qrVerified: true,
+          queueNumber: item.queueNumber,
+          checkedInAt: item.checkedInAt,
+          checkedInBy: item.checkedInBy,
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt,
+        } as Appointment));
+
+        const filteredByDoctor = queueAppointments.filter((app) => {
+          const doctorId = (app.doctorId || '').toLowerCase();
+          const searchValue = doctorSearch.trim().toLowerCase();
+
+          const matchesFilter = doctorFilter === 'all' || doctorId === doctorFilter.toLowerCase();
+          const matchesSearch = searchValue === '' || doctorId.includes(searchValue);
+
+          return matchesFilter && matchesSearch;
+        });
+
+        setAppointments(filteredByDoctor.sort((a, b) => (a.queueNumber || 0) - (b.queueNumber || 0)));
+        setLoading(false);
+      });
+    };
+
+    setup();
+
+    return () => {
+      isActive = false;
+      if (unsub) unsub();
+    };
+  }, [profile, today, doctorFilter, doctorSearch]);
+
+  const handleStatusUpdate = async (app: Appointment, status: AppointmentStatus) => {
     if (!profile) return;
-    await updateAppointmentStatus(profile.clinicId, id, status);
+    await updateAppointmentStatus(profile.clinicId, app.id, app, status);
   };
 
   return (
@@ -54,6 +96,36 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
         </div>
         <div className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-bold text-white shadow-lg shadow-sky-100">
           {appointments.length} Patients Active
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-center">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+          <input
+            type="text"
+            value={doctorSearch}
+            onChange={(e) => setDoctorSearch(e.target.value)}
+            placeholder="Search doctorId in patientQueue..."
+            className="w-full rounded-xl bg-slate-50 py-2 pl-10 pr-4 text-sm outline-none"
+          />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Clock className="text-slate-400" size={18} />
+          <span className="text-xs font-semibold text-slate-500">Doctor</span>
+          <select
+            className="rounded-xl bg-slate-50 px-4 py-2 text-sm outline-none"
+            value={doctorFilter}
+            onChange={(e) => setDoctorFilter(e.target.value)}
+          >
+            <option value="all">All Doctors</option>
+            {Array.from(new Set(appointments.map((a) => a.doctorId).filter(Boolean))).map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -105,7 +177,7 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
                     <div className="flex items-center justify-end gap-2">
                       {(app.status === 'checked_in' || app.status === 'confirmed') && (
                         <button 
-                          onClick={() => handleStatusUpdate(app.id, 'called')}
+                          onClick={() => handleStatusUpdate(app, 'called')}
                           className="flex items-center gap-2 rounded-xl bg-orange-500 px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-orange-600 transition-all active:scale-95"
                         >
                           <Play size={14} /> CALL
@@ -113,7 +185,7 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
                       )}
                       {app.status === 'called' && (
                         <button 
-                          onClick={() => handleStatusUpdate(app.id, 'in_consultation')}
+                          onClick={() => handleStatusUpdate(app, 'in_consultation')}
                           className="flex items-center gap-2 rounded-xl bg-sky-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-sky-700 transition-all active:scale-95"
                         >
                           <ArrowRight size={14} /> START
@@ -121,7 +193,7 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
                       )}
                       {app.status === 'in_consultation' && (
                         <button 
-                          onClick={() => handleStatusUpdate(app.id, 'completed')}
+                          onClick={() => handleStatusUpdate(app, 'completed')}
                           className="flex items-center gap-2 rounded-xl bg-green-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-green-700 transition-all active:scale-95"
                         >
                           <CheckCircle2 size={14} /> DONE

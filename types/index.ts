@@ -12,9 +12,12 @@ export interface UserProfile {
 
 export interface ReceptionistProfile {
   uid: string;
+  firebaseUid?: string;
   clinicId: string;
   fullName: string;
   email: string;
+  photoUrl?: string;
+  linked_doctor_ids?: string[];
   phone: string;
   gender: string;
   shift: string;
@@ -28,10 +31,16 @@ export interface ReceptionistProfile {
 
 export interface DoctorProfile {
   uid: string;
+  firebaseUid?: string;
+  doctorId?: string;
   fullName: string;
+  name?: string;
+  doctorName?: string;
   specialization: string;
   roomNumber: string;
   status: string;
+  email?: string;
+  photoUrl?: string;
   profileImageUrl: string;
   createdAt: any;
 }
@@ -45,10 +54,13 @@ export interface Appointment {
   doctorName: string;
   clinicId: string;
   date: string;
+  appointmentDate?: string;
+  appointmentTime?: string;
   slotStartTime: string;
   slotEndTime: string;
   appointmentKey?: string;
   status: AppointmentStatus;
+  paymentStatus?: 'pending' | 'paid' | 'failed';
   qrVerified: boolean;
   verificationToken?: string;
   queueNumber?: number;
@@ -57,6 +69,14 @@ export interface Appointment {
   rejectionReason?: string;
   createdAt: any;
   updatedAt: any;
+}
+
+export interface DashboardDailySummary {
+  todayAppointments: number;
+  waitingPatients: number;
+  completed: number;
+  cancelled: number;
+  updatedAt?: any;
 }
 
 export type AppointmentStatus = 

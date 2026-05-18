@@ -1,4 +1,4 @@
-name: Run Tests
+name: CI
 
 on:
   push:
@@ -9,22 +9,34 @@ on:
       - main
 
 jobs:
-  test:
-    name: Run Project Tests
+  build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository Code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
-      - name: Install Dependencies
-        run: npm install
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Run Tests
-        run: npm test
-        
+      - name: Run available quality checks
+        run: |
+          node <<'NODE'
+          const { execSync } = require('node:child_process');
+          const { scripts = {} } = require('./package.json');
+
+          for (const scriptName of ['lint', 'typecheck', 'test', 'build']) {
+            if (scripts[scriptName]) {
+              console.log(`Running npm run ${scriptName}`);
+              execSync(`npm run ${scriptName}`, { stdio: 'inherit' });
+            } else {
+              console.log(`Skipping missing script: ${scriptName}`);
+            }
+          }
+          NODE

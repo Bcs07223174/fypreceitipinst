@@ -1,0 +1,18 @@
+{
+  "rules": {
+    ".read": true,
+    ".write": true,
+
+    "appointments": {
+      ".indexOn": ["appointmentDate", "doctorId", "status", "paymentStatus"]
+    },
+
+    "patientQueue": {
+      ".indexOn": ["doctorId", "status", "queueNumber"]
+    },
+
+    "clinics": {
+      ".indexOn": ["clinicId"]
+    }
+  }
+}

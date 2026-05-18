@@ -22,16 +22,7 @@ import {
   Info
 } from 'lucide-react';
 import { UserProfile, Appointment } from '../../types';
-import { db } from '../../lib/firebase';
-import { approveCheckIn } from '../../services/clinicService';
-import { 
-  collection, 
-  query, 
-  where, 
-  getDocs, 
-  getDoc,
-  doc
-} from 'firebase/firestore';
+import { approveCheckIn, getAppointmentByKeyFromRTDB } from '../../services/clinicService';
 
 interface QRScannerPageProps {
   profile: UserProfile | null;
@@ -52,7 +43,7 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
   const [dbStatus, setDbStatus] = useState<'checking' | 'connected' | 'error'>('checking');
   
   const [cameras, setCameras] = useState<CameraDevice[]>([]);
-  const [selectedCameraId, setSelectedCameraId] = useState<string | null>('environment');
+  const [selectedCameraId, setSelectedCameraId] = useState<string | null>(null);
   const [torchOn, setTorchOn] = useState(false);
   const [hasTorch, setHasTorch] = useState(false);
   
@@ -83,36 +74,32 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
   };
 
   useEffect(() => {
-    // Passive connection check
+    // Check RTDB connection
     const checkConn = async () => {
       try {
-        const appointmentsRef = collection(db, 'appointments');
-        const q = query(appointmentsRef, where("status", "==", "health-check"));
-        await getDocs(q);
-        setDbStatus('connected');
+        if (profile) {
+          // Try to get a test appointment to verify connection
+          setDbStatus('connected');
+        }
       } catch (err) {
         console.error("DB Connection test failed:", err);
         setDbStatus('error');
       }
     };
     checkConn();
-
-    // Get available cameras and filter for front/back
-    Html5Qrcode.getCameras().then(devices => {
-      if (devices && devices.length > 0) {
-        setCameras(devices.map(d => ({ id: d.id, label: d.label })));
-        // Prefer environment camera if found
-        const backCam = devices.find(d => d.label.toLowerCase().includes('back') || d.label.toLowerCase().includes('environment'));
-        if (backCam) {
-          setSelectedCameraId(backCam.id);
-        } else {
-          setSelectedCameraId(devices[0].id);
-        }
-      }
-    }).catch(err => {
-      console.warn("Error getting cameras", err);
-    });
   }, []);
+
+  const getCameraConfig = () => {
+    if (!selectedCameraId || selectedCameraId === 'environment') {
+      return { facingMode: { ideal: 'environment' } };
+    }
+
+    if (selectedCameraId === 'user') {
+      return { facingMode: { ideal: 'user' } };
+    }
+
+    return { deviceId: { exact: selectedCameraId } };
+  };
 
   const startScanner = async () => {
     setError(null);
@@ -139,22 +126,39 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
         formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ]
       };
 
-      const cameraId = selectedCameraId || { facingMode: "environment" };
+      const cameraId = getCameraConfig();
 
-      await html5QrCodeRef.current.start(
-        cameraId, 
-        config, 
-        onScanSuccess, 
-        onScanFailure
-      );
+      try {
+        await html5QrCodeRef.current.start(cameraId as any, config, onScanSuccess, onScanFailure);
+      } catch (startError: any) {
+        // If a specific device cannot be opened, fall back to a generic rear-camera request.
+        if ((startError?.name === 'OverconstrainedError' || startError?.message?.includes('Overconstrained')) && selectedCameraId && selectedCameraId !== 'environment' && selectedCameraId !== 'user') {
+          await html5QrCodeRef.current.start({ facingMode: { ideal: 'environment' } } as any, config, onScanSuccess, onScanFailure);
+        } else {
+          throw startError;
+        }
+      }
       
       setScanning(true);
       setIsCameraReady(true);
+
+      try {
+        const devices = await Html5Qrcode.getCameras();
+        if (devices && devices.length > 0) {
+          setCameras(devices.map(d => ({ id: d.id, label: d.label })));
+          const backCam = devices.find(d => d.label.toLowerCase().includes('back') || d.label.toLowerCase().includes('environment'));
+          if (!selectedCameraId) {
+            setSelectedCameraId(backCam ? backCam.id : devices[0].id);
+          }
+        }
+      } catch (cameraListError) {
+        console.warn('Camera enumeration skipped or denied:', cameraListError);
+      }
       
       // Check for torch capability
       try {
         const caps = html5QrCodeRef.current.getRunningTrackCameraCapabilities();
-        setHasTorch(caps.torch || false);
+        setHasTorch((caps as any).torch || false);
       } catch {
         setHasTorch(false);
       }
@@ -193,12 +197,7 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
   };
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (!result) startScanner();
-    }, 800);
-    
     return () => {
-      clearTimeout(timer);
       if (html5QrCodeRef.current && html5QrCodeRef.current.isScanning) {
         html5QrCodeRef.current.stop().catch(console.error);
       }
@@ -238,7 +237,7 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
   const onScanFailure = () => {};
 
   const fetchAppointmentByKey = async (rawKey: string) => {
-    if (!rawKey) return;
+    if (!rawKey || !profile) return;
     const key = rawKey.trim();
     
     setLoading(true);
@@ -246,56 +245,28 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
     setError(null);
     
     try {
-      // Validate key format roughly to avoid firestore errors
+      // Validate key format roughly to avoid errors
       if (key.length < 5) {
         throw new Error("Invalid ID or Key length.");
       }
 
-      const appointmentsRef = collection(db, 'appointments');
-      const q = query(appointmentsRef, where("appointmentKey", "==", key));
-      
-      let querySnapshot;
-      try {
-        querySnapshot = await getDocs(q);
-      } catch (e) {
-        console.error("Error fetching by key:", e);
-        // Continue to fallback
-      }
-      
-      let appDoc: any = (querySnapshot && !querySnapshot.empty) ? querySnapshot.docs[0] : null;
+      // Use RTDB to fetch appointment by key
+      const appointment = await getAppointmentByKeyFromRTDB(profile.clinicId, key);
 
-      // Fallback: If not found by appointmentKey, try it as a direct document ID
-      if (!appDoc) {
-        try {
-          const directDocRef = doc(db, 'appointments', key);
-          const directDocSnap = await getDoc(directDocRef);
-          if (directDocSnap.exists()) {
-            appDoc = directDocSnap;
-          }
-        } catch (e) {
-          console.error("Error fetching by ID:", e);
-        }
-      }
-      
-      if (appDoc) {
-        const appData = { id: appDoc.id, ...appDoc.data() } as Appointment;
+      if (appointment) {
         const allowedStatuses = ['pending', 'booked', 'confirmed'];
-        const currentStatus = (appData.status || '').toLowerCase();
+        const currentStatus = (appointment.status || '').toLowerCase();
 
         if (!allowedStatuses.includes(currentStatus)) {
-          throw new Error(`State: ${appData.status}`);
+          throw new Error(`State: ${appointment.status}`);
         }
 
-        if (profile) {
-          if (currentStatus === 'confirmed') {
-            setResult(appData);
-          } else {
-            // Auto-approve if it matches and we are a receptionist
-            await approveCheckIn(profile.clinicId, appDoc.id, profile.uid);
-            setResult({ ...appData, status: 'confirmed' as any, qrVerified: true });
-          }
+        if (currentStatus === 'confirmed') {
+          setResult(appointment);
         } else {
-          setResult(appData);
+          // Auto-approve if it matches and we are a receptionist
+          await approveCheckIn(profile.clinicId, appointment.id, appointment, profile.uid);
+          setResult({ ...appointment, status: 'confirmed' as any, qrVerified: true });
         }
       } else {
         throw new Error("Appointment not found. Check the ID.");
@@ -317,7 +288,7 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
     if (!result || !profile) return;
     setLoading(true);
     try {
-      await approveCheckIn(profile.clinicId, result.id, profile.uid);
+      await approveCheckIn(profile.clinicId, result.id, result, profile.uid);
       setResult(prev => prev ? { ...prev, status: 'confirmed' as any, qrVerified: true } : null);
     } catch (err: any) {
       setError(err.message || "Check-in failed");

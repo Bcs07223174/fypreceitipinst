@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { UserProfile, ReceptionistProfile, DoctorProfile } from '../../types';
 import { getReceptionistProfile, getAssignedDoctors } from '../../services/clinicService';
-import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 
 interface ProfilePageProps {
@@ -30,9 +30,17 @@ export default function ProfilePage({ profile }: ProfilePageProps) {
     gender: 'Other'
   });
   const [saving, setSaving] = useState(false);
+  const linkedDoctorCount = rec?.assignedDoctorIds.length || 0;
+  const missingDoctorCount = Math.max(linkedDoctorCount - doctors.length, 0);
 
   useEffect(() => {
     if (profile) {
+      console.log('PROFILE PAGE RAW PROFILE:', profile);
+      console.log('PROFILE PAGE firebaseUid:', (profile as typeof profile & { firebaseUid?: string })?.firebaseUid);
+      console.log('PROFILE PAGE clinicId:', profile?.clinicId);
+      console.log('PROFILE PAGE assignedDoctorIds:', (profile as typeof profile & { assignedDoctorIds?: string[] })?.assignedDoctorIds);
+      console.log('PROFILE PAGE assignedDoctorIds count:', (profile as typeof profile & { assignedDoctorIds?: string[] })?.assignedDoctorIds?.length);
+
       getReceptionistProfile(profile.clinicId, profile.uid).then(data => {
         if (data) {
           setRec(data);
@@ -54,11 +62,15 @@ export default function ProfilePage({ profile }: ProfilePageProps) {
     if (!profile || !rec) return;
     setSaving(true);
     try {
-      const path = `clinics/${profile.clinicId}/receptionists/${profile.uid}`;
-      await updateDoc(doc(db, path), {
+      const updatePayload = {
         ...formData,
         updatedAt: serverTimestamp()
-      });
+      };
+
+      await Promise.all([
+        setDoc(doc(db, 'receptionists', profile.uid), updatePayload, { merge: true }),
+        setDoc(doc(db, 'clinics', profile.clinicId, 'receptionists', profile.uid), updatePayload, { merge: true }),
+      ]);
       setRec({ ...rec, ...formData });
       setEditing(false);
     } catch (err) {
@@ -80,9 +92,17 @@ export default function ProfilePage({ profile }: ProfilePageProps) {
         <div className="space-y-6">
           <div className="rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-sm">
             <div className="relative mx-auto mb-6 h-32 w-32">
-              <div className="flex h-full w-full items-center justify-center rounded-3xl bg-sky-50 text-sky-600 font-bold text-4xl shadow-inner uppercase">
-                {rec?.fullName?.[0] || 'R'}
-              </div>
+              {rec?.photoUrl || rec?.profileImageUrl ? (
+                <img
+                  src={rec?.photoUrl || rec?.profileImageUrl}
+                  alt={rec?.fullName || 'Receptionist'}
+                  className="h-full w-full rounded-3xl object-cover shadow-inner"
+                />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center rounded-3xl bg-sky-50 text-sky-600 font-bold text-4xl shadow-inner uppercase">
+                  {rec?.fullName?.[0] || 'R'}
+                </div>
+              )}
               <button className="absolute -bottom-2 -right-2 rounded-xl bg-white p-2 text-slate-600 shadow-lg hover:text-sky-600">
                 <Camera size={20} />
               </button>
@@ -98,6 +118,14 @@ export default function ProfilePage({ profile }: ProfilePageProps) {
 
           <div className="rounded-3xl border border-slate-200 bg-white p-8 space-y-6">
             <h3 className="font-bold text-slate-900">Assigned To</h3>
+            <p className="text-xs text-slate-500">
+              Linked doctor IDs: {linkedDoctorCount} | Loaded doctor records: {doctors.length}
+            </p>
+            {missingDoctorCount > 0 && (
+              <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                {missingDoctorCount} linked doctor record{missingDoctorCount === 1 ? '' : 's'} are missing from the clinic doctors collection.
+              </p>
+            )}
             <div className="space-y-4">
               {doctors.map(doctor => (
                 <div key={doctor.uid} className="flex items-center gap-4">
