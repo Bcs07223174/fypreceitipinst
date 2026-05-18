@@ -671,7 +671,9 @@ export const listenToPatientQueue = (
   date: string,
   callback: (queueItems: any[]) => void
 ): Unsubscribe => {
-  const clinicQueueRef = ref(rtdb, `patientQueue/${clinicId}`);
+  const clinicAliases = resolveClinicIds(clinicId);
+  const unsubscribers: Unsubscribe[] = [];
+  const sourceItems = new Map<string, any>();
 
   const collectQueueLeaves = (
     node: any,
@@ -695,39 +697,58 @@ export const listenToPatientQueue = (
     );
   };
 
-  return onValue(clinicQueueRef, (snapshot) => {
-    const data = snapshot.val();
-
-    if (!data) {
-      callback([]);
-      return;
-    }
-
-    const queueItems: any[] = [];
-
-    Object.entries(data).forEach(([queueDoctorId, doctorQueue]: [string, any]) => {
-      const leaves = collectQueueLeaves(doctorQueue, queueDoctorId);
-
-      leaves.forEach((item) => {
-        const linkedDoctorId = item.doctorId || item.branchDoctorId || queueDoctorId;
+  const emitQueueItems = () => {
+    const queueItems = Array.from(sourceItems.values())
+      .filter((item) => {
+        const linkedDoctorId = item.doctorId || item.branchDoctorId || '';
         const itemDate = item.date || item.appointmentDate || '';
 
-        if (itemDate !== date) return;
-        if (doctorId !== 'all' && doctorId && doctorId !== linkedDoctorId && doctorId !== queueDoctorId) return;
+        if (itemDate !== date) return false;
+        if (doctorId !== 'all' && doctorId && doctorId !== linkedDoctorId) return false;
+        return true;
+      })
+      .map((item) => ({
+        ...item,
+        appointmentId: item.appointmentId || item.id || '',
+        doctorId: item.doctorId || item.branchDoctorId || '',
+      }))
+      .sort((a, b) => (a.queueNumber || 0) - (b.queueNumber || 0));
 
-        queueItems.push({
-          ...item,
-          appointmentId: item.appointmentId || item.id || '',
-          doctorId: linkedDoctorId,
-        });
-      });
-    });
+    callback(queueItems);
+  };
 
-    callback(queueItems.sort((a, b) => (a.queueNumber || 0) - (b.queueNumber || 0)));
-  }, (error) => {
-    console.error("Error listening to patient queue:", error);
-    callback([]);
+  clinicAliases.forEach((alias) => {
+    const queuePath = doctorId && doctorId !== 'all'
+      ? `patientQueue/${alias}/${doctorId}`
+      : `patientQueue/${alias}`;
+
+    unsubscribers.push(onValue(ref(rtdb, queuePath), (snapshot) => {
+      const data = snapshot.val();
+
+      if (!data) {
+        sourceItems.set(queuePath, []);
+        emitQueueItems();
+        return;
+      }
+
+      const items = doctorId && doctorId !== 'all'
+        ? collectQueueLeaves(data, doctorId)
+        : Object.entries(data).flatMap(([queueDoctorId, doctorQueue]: [string, any]) =>
+            collectQueueLeaves(doctorQueue, queueDoctorId)
+          );
+
+      sourceItems.set(queuePath, items);
+      emitQueueItems();
+    }, (error) => {
+      console.error('Error listening to patient queue:', error);
+      sourceItems.set(queuePath, []);
+      emitQueueItems();
+    }));
   });
+
+  return () => {
+    unsubscribers.forEach((unsubscribe) => unsubscribe());
+  };
 };
 
 /**

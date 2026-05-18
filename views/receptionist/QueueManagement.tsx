@@ -9,8 +9,8 @@ import {
   Search,
   ArrowRight
 } from 'lucide-react';
-import { UserProfile, Appointment, AppointmentStatus } from '../../types';
-import { listenToClinicPatientQueue, updateAppointmentStatus } from '../../services/clinicService';
+import { UserProfile, Appointment, AppointmentStatus, DoctorProfile } from '../../types';
+import { listenToClinicPatientQueue, updateAppointmentStatus, getReceptionistProfile, getAssignedDoctors } from '../../services/clinicService';
 import { format } from 'date-fns';
 
 interface QueueManagementProps {
@@ -19,6 +19,7 @@ interface QueueManagementProps {
 
 export default function QueueManagement({ profile }: QueueManagementProps) {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [doctorOptions, setDoctorOptions] = useState<DoctorProfile[]>([]);
   const today = format(new Date(), 'yyyy-MM-dd');
   const [loading, setLoading] = useState(true);
   const [doctorFilter, setDoctorFilter] = useState('all');
@@ -32,6 +33,19 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
       if (!profile) return;
 
       setLoading(true);
+      try {
+        const receptionist = await getReceptionistProfile(profile.clinicId, profile.uid);
+        if (receptionist?.assignedDoctorIds?.length) {
+          const linkedDoctors = await getAssignedDoctors(profile.clinicId, receptionist.assignedDoctorIds);
+          setDoctorOptions(linkedDoctors);
+        } else {
+          setDoctorOptions([]);
+        }
+      } catch (error) {
+        console.error('Error loading linked doctors:', error);
+        setDoctorOptions([]);
+      }
+
       unsub = listenToClinicPatientQueue(profile.clinicId, 'all', today, (data) => {
         if (!isActive) return;
 
@@ -59,17 +73,7 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
           updatedAt: item.updatedAt,
         } as Appointment));
 
-        const filteredByDoctor = queueAppointments.filter((app) => {
-          const doctorId = (app.doctorId || '').toLowerCase();
-          const searchValue = doctorSearch.trim().toLowerCase();
-
-          const matchesFilter = doctorFilter === 'all' || doctorId === doctorFilter.toLowerCase();
-          const matchesSearch = searchValue === '' || doctorId.includes(searchValue);
-
-          return matchesFilter && matchesSearch;
-        });
-
-        setAppointments(filteredByDoctor.sort((a, b) => (a.queueNumber || 0) - (b.queueNumber || 0)));
+        setAppointments(queueAppointments.sort((a, b) => (a.queueNumber || 0) - (b.queueNumber || 0)));
         setLoading(false);
       });
     };
@@ -80,7 +84,28 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
       isActive = false;
       if (unsub) unsub();
     };
-  }, [profile, today, doctorFilter, doctorSearch]);
+  }, [profile, today, doctorFilter]);
+
+  const filteredAppointments = appointments.filter((app) => {
+    const doctorId = (app.doctorId || '').toLowerCase();
+    const doctorName = (app.doctorName || '').toLowerCase();
+    const searchValue = doctorSearch.trim().toLowerCase();
+
+    const matchesFilter = doctorFilter === 'all' || doctorId === doctorFilter.toLowerCase();
+    const matchesSearch =
+      searchValue === '' ||
+      doctorId.includes(searchValue) ||
+      doctorName.includes(searchValue);
+
+    return matchesFilter && matchesSearch;
+  });
+
+  const doctorSelectOptions = doctorOptions.length > 0
+    ? doctorOptions
+    : Array.from(new Map(appointments.map((app) => [app.doctorId, app.doctorName || app.doctorId])).entries()).map(([id, name]) => ({
+        uid: id,
+        fullName: name,
+      } as DoctorProfile));
 
   const handleStatusUpdate = async (app: Appointment, status: AppointmentStatus) => {
     if (!profile) return;
@@ -113,16 +138,16 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
 
         <div className="flex items-center gap-2">
           <Clock className="text-slate-400" size={18} />
-          <span className="text-xs font-semibold text-slate-500">Doctor</span>
+          <span className="text-xs font-semibold text-slate-500">Linked Doctor</span>
           <select
             className="rounded-xl bg-slate-50 px-4 py-2 text-sm outline-none"
             value={doctorFilter}
             onChange={(e) => setDoctorFilter(e.target.value)}
           >
             <option value="all">All Doctors</option>
-            {Array.from(new Set(appointments.map((a) => a.doctorId).filter(Boolean))).map((id) => (
-              <option key={id} value={id}>
-                {id}
+            {doctorSelectOptions.map((doctor) => (
+              <option key={doctor.uid} value={doctor.uid}>
+                {doctor.fullName || doctor.uid}
               </option>
             ))}
           </select>
@@ -144,7 +169,7 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {appointments.map((app) => (
+              {filteredAppointments.map((app) => (
                 <tr key={app.id} className={`${app.status === 'called' ? 'bg-orange-50/50' : app.status === 'in_consultation' ? 'bg-blue-50/50' : ''}`}>
                   <td className="px-6 py-4">
                     <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-900 text-lg font-bold text-white shadow-sm">
@@ -206,7 +231,7 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
                   </td>
                 </tr>
               ))}
-              {appointments.length === 0 && !loading && (
+                {filteredAppointments.length === 0 && !loading && (
                 <tr>
                    <td colSpan={6} className="py-24 text-center">
                       <div className="flex flex-col items-center gap-3 text-slate-400">
