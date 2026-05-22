@@ -14,6 +14,7 @@ import {
   confirmCheckInAndAddToQueue,
   updateAppointmentStatus as updateRTDBAppointmentStatus,
   listenToPatientQueue,
+  fetchPatientQueueSnapshot,
   createAppointment,
   getAppointmentByKey,
   listenToDashboardSummary,
@@ -323,6 +324,13 @@ export const listenToClinicPatientQueue = (
   callback: (queueItems: any[]) => void
 ) => {
   return listenToPatientQueue(clinicId, doctorId, date, callback);
+};
+
+export const fetchClinicPatientQueue = async (
+  clinicId: string,
+  doctorId: string = 'all'
+): Promise<Appointment[]> => {
+  return fetchPatientQueueSnapshot(clinicId, doctorId);
 };
 
 export const getDashboardSummary = (

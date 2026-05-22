@@ -10,7 +10,7 @@ import {
   ArrowRight
 } from 'lucide-react';
 import { UserProfile, Appointment, AppointmentStatus, DoctorProfile } from '../../types';
-import { listenToClinicPatientQueue, updateAppointmentStatus, getReceptionistProfile, getAssignedDoctors } from '../../services/clinicService';
+import { listenToClinicPatientQueue, updateAppointmentStatus, getReceptionistProfile, getAssignedDoctors, fetchClinicPatientQueue } from '../../services/clinicService';
 import { format } from 'date-fns';
 
 interface QueueManagementProps {
@@ -20,10 +20,27 @@ interface QueueManagementProps {
 export default function QueueManagement({ profile }: QueueManagementProps) {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [doctorOptions, setDoctorOptions] = useState<DoctorProfile[]>([]);
+  const [linkedDoctorIds, setLinkedDoctorIds] = useState<string[]>([]);
   const today = format(new Date(), 'yyyy-MM-dd');
   const [loading, setLoading] = useState(true);
+  const [syncState, setSyncState] = useState<'loading' | 'live' | 'snapshot' | 'empty' | 'error'>('loading');
   const [doctorFilter, setDoctorFilter] = useState('all');
   const [doctorSearch, setDoctorSearch] = useState('');
+
+  const normalizeAppointment = (item: Appointment & { appointmentId?: string }, index = 0): Appointment => {
+    const generatedId = [
+      profile?.clinicId || 'clinic',
+      item.doctorId || 'doctor',
+      item.patientId || 'patient',
+      item.date || 'date',
+      item.queueNumber ?? index,
+    ].join('-');
+
+    return {
+      ...item,
+      id: item.id || item.appointmentId || generatedId,
+    };
+  };
 
   useEffect(() => {
     let unsub: (() => void) | undefined;
@@ -35,8 +52,11 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
       setLoading(true);
       try {
         const receptionist = await getReceptionistProfile(profile.clinicId, profile.uid);
-        if (receptionist?.assignedDoctorIds?.length) {
-          const linkedDoctors = await getAssignedDoctors(profile.clinicId, receptionist.assignedDoctorIds);
+        const assignedIds = receptionist?.assignedDoctorIds || [];
+        setLinkedDoctorIds(assignedIds);
+
+        if (assignedIds.length) {
+          const linkedDoctors = await getAssignedDoctors(profile.clinicId, assignedIds);
           setDoctorOptions(linkedDoctors);
         } else {
           setDoctorOptions([]);
@@ -46,7 +66,20 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
         setDoctorOptions([]);
       }
 
-      unsub = listenToClinicPatientQueue(profile.clinicId, 'all', today, (data) => {
+      const doctorIdToQuery = doctorFilter !== 'all' ? doctorFilter : 'all';
+
+      const snapshot = await fetchClinicPatientQueue(profile.clinicId, doctorIdToQuery);
+      if (!isActive) return;
+
+      if (snapshot.length > 0) {
+        setAppointments(snapshot.map((item, index) => normalizeAppointment(item, index)));
+        setSyncState('snapshot');
+      } else {
+        setAppointments([]);
+        setSyncState('empty');
+      }
+
+      unsub = listenToClinicPatientQueue(profile.clinicId, doctorIdToQuery, '', (data) => {
         if (!isActive) return;
 
         const queueAppointments = data.map((item) => ({
@@ -73,9 +106,18 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
           updatedAt: item.updatedAt,
         } as Appointment));
 
-        setAppointments(queueAppointments.sort((a, b) => (a.queueNumber || 0) - (b.queueNumber || 0)));
+        const visibleAppointments = doctorIdToQuery === 'all'
+          ? queueAppointments
+          : queueAppointments.filter((app) => normalizeDoctorId(app.doctorId) === normalizeDoctorId(doctorIdToQuery));
+
+        const sorted = visibleAppointments
+          .map((item, index) => normalizeAppointment(item, index))
+          .sort((a, b) => (a.queueNumber || 0) - (b.queueNumber || 0));
+        setAppointments(sorted);
+        setSyncState(sorted.length > 0 ? 'live' : 'empty');
         setLoading(false);
       });
+      setLoading(false);
     };
 
     setup();
@@ -84,18 +126,29 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
       isActive = false;
       if (unsub) unsub();
     };
-  }, [profile, today, doctorFilter]);
+  }, [profile, today, doctorFilter, linkedDoctorIds]);
+
+  const normalizeDoctorId = (value: string | number | null | undefined) => String(value ?? '').trim().replace(/_/g, '-').toLowerCase();
+  const getDoctorIdentifier = (doctor: DoctorProfile) => doctor.doctorId || doctor.uid;
 
   const filteredAppointments = appointments.filter((app) => {
     const doctorId = (app.doctorId || '').toLowerCase();
     const doctorName = (app.doctorName || '').toLowerCase();
+    const patientName = (app.patientName || '').toLowerCase();
+    const patientPhone = (app.patientPhone || '').toLowerCase();
+    const patientId = (app.patientId || '').toLowerCase();
     const searchValue = doctorSearch.trim().toLowerCase();
 
-    const matchesFilter = doctorFilter === 'all' || doctorId === doctorFilter.toLowerCase();
+    const matchesFilter = doctorFilter === 'all'
+      ? true
+      : normalizeDoctorId(doctorId) === normalizeDoctorId(doctorFilter);
     const matchesSearch =
       searchValue === '' ||
       doctorId.includes(searchValue) ||
-      doctorName.includes(searchValue);
+      doctorName.includes(searchValue) ||
+      patientName.includes(searchValue) ||
+      patientPhone.includes(searchValue) ||
+      patientId.includes(searchValue);
 
     return matchesFilter && matchesSearch;
   });
@@ -112,6 +165,23 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
     await updateAppointmentStatus(profile.clinicId, app.id, app, status);
   };
 
+  const handleRefreshQueue = async () => {
+    if (!profile) return;
+
+    setLoading(true);
+    try {
+      const doctorIdToQuery = doctorFilter !== 'all' ? doctorFilter : 'all';
+      const snapshot = await fetchClinicPatientQueue(profile.clinicId, doctorIdToQuery);
+      setAppointments(snapshot.map((item, index) => normalizeAppointment(item, index)));
+      setSyncState(snapshot.length > 0 ? 'snapshot' : 'empty');
+    } catch (error) {
+      console.error('Error refreshing queue snapshot:', error);
+      setSyncState('error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -120,7 +190,7 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
           <p className="text-slate-500">Managing patients currently present in the clinic.</p>
         </div>
         <div className="rounded-xl bg-sky-600 px-4 py-2 text-sm font-bold text-white shadow-lg shadow-sky-100">
-          {appointments.length} Patients Active
+          {filteredAppointments.length} Patients Active
         </div>
       </div>
 
@@ -146,12 +216,26 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
           >
             <option value="all">All Doctors</option>
             {doctorSelectOptions.map((doctor) => (
-              <option key={doctor.uid} value={doctor.uid}>
-                {doctor.fullName || doctor.uid}
+              <option key={getDoctorIdentifier(doctor)} value={getDoctorIdentifier(doctor)}>
+                {doctor.fullName || getDoctorIdentifier(doctor)}
               </option>
             ))}
           </select>
         </div>
+
+        <button
+          onClick={handleRefreshQueue}
+          className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition-all hover:bg-slate-800"
+        >
+          Refresh Queue
+        </button>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-500">
+        Queue sync: <span className="font-semibold text-slate-700">{syncState}</span>
+        {appointments.length > 0 && (
+          <span className="ml-2">({appointments.length} records loaded from patientQueue)</span>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-6">
@@ -169,8 +253,8 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredAppointments.map((app) => (
-                <tr key={app.id} className={`${app.status === 'called' ? 'bg-orange-50/50' : app.status === 'in_consultation' ? 'bg-blue-50/50' : ''}`}>
+              {filteredAppointments.map((app, index) => (
+                <tr key={app.id || `${app.patientId || 'patient'}-${app.doctorId || 'doctor'}-${app.queueNumber || index}`} className={`${app.status === 'called' ? 'bg-orange-50/50' : app.status === 'in_consultation' ? 'bg-blue-50/50' : ''}`}>
                   <td className="px-6 py-4">
                     <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-900 text-lg font-bold text-white shadow-sm">
                       {app.queueNumber}
@@ -179,7 +263,10 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
                   <td className="px-6 py-4">
                     <div>
                       <p className="text-sm font-bold text-slate-900">{app.patientName}</p>
-                      <p className="text-xs text-slate-400">ID: #{app.id?.slice(-6)?.toUpperCase() || '------'}</p>
+                      <p className="text-xs text-slate-400">Patient ID: {app.patientId || `#${app.id?.slice(-6)?.toUpperCase() || '------'}`}</p>
+                      {app.patientPhone && (
+                        <p className="text-xs text-slate-400">Phone: {app.patientPhone}</p>
+                      )}
                     </div>
                   </td>
                   <td className="px-6 py-4">
@@ -237,7 +324,7 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
                       <div className="flex flex-col items-center gap-3 text-slate-400">
                          <Users size={64} className="opacity-10" />
                          <p className="text-lg font-medium">Queue is currently empty</p>
-                         <p className="max-w-xs text-sm">Patients checked in via the QR scanner will appear here automatically.</p>
+                         <p className="max-w-xs text-sm">Use Refresh Queue to re-read patientQueue. If records exist in RTDB but still do not appear, the filter or permissions are the problem.</p>
                       </div>
                    </td>
                 </tr>
@@ -246,6 +333,38 @@ export default function QueueManagement({ profile }: QueueManagementProps) {
            </table>
         </div>
       </div>
+
+      {appointments.length > 0 && (
+        <div className="rounded-2xl border border-slate-200 bg-white p-4">
+          <h3 className="mb-3 text-sm font-semibold text-slate-900">Raw queue records</h3>
+          <div className="overflow-auto">
+            <table className="min-w-full text-left text-xs">
+              <thead className="bg-slate-50 text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">appointmentId</th>
+                  <th className="px-3 py-2">doctorId</th>
+                  <th className="px-3 py-2">doctorName</th>
+                  <th className="px-3 py-2">date</th>
+                  <th className="px-3 py-2">queueNumber</th>
+                  <th className="px-3 py-2">status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {appointments.map((app) => (
+                  <tr key={`raw-${app.id}`} className="border-t border-slate-100">
+                    <td className="px-3 py-2 font-mono text-slate-700">{app.id}</td>
+                    <td className="px-3 py-2 font-mono text-slate-700">{app.doctorId}</td>
+                    <td className="px-3 py-2 text-slate-700">{app.doctorName}</td>
+                    <td className="px-3 py-2 text-slate-700">{app.date || app.appointmentDate || '-'}</td>
+                    <td className="px-3 py-2 text-slate-700">{app.queueNumber ?? '-'}</td>
+                    <td className="px-3 py-2 text-slate-700">{app.status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

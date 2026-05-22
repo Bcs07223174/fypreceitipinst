@@ -67,6 +67,13 @@ const doctorIdMatches = (appointmentDoctorId: string, doctorIds: string[]): bool
 const dashboardSummaryPath = (clinicId: string, date: string) =>
   `dashboardSummaries/${clinicId}/${date}`;
 
+const doctorAppointmentsPath = (clinicId: string, doctorId: string, appointmentId?: string) =>
+  appointmentId
+    ? `doctorAppointments/${clinicId}/${doctorId}/${appointmentId}`
+    : doctorId
+      ? `doctorAppointments/${clinicId}/${doctorId}`
+      : `doctorAppointments/${clinicId}`;
+
 const emptyDashboardSummary = (): DashboardDailySummary => ({
   todayAppointments: 0,
   waitingPatients: 0,
@@ -95,6 +102,29 @@ const toAppointmentSummary = (
 
 const stripUndefinedFields = <T extends Record<string, unknown>>(value: T): Record<string, unknown> =>
   Object.fromEntries(Object.entries(value).filter(([, fieldValue]) => fieldValue !== undefined));
+
+const collectAppointmentLeaves = (
+  node: any,
+  branchDoctorId: string = '',
+  path: string[] = []
+): Array<{ appointmentId: string; doctorId: string; [key: string]: unknown }> => {
+  if (!node || typeof node !== 'object') {
+    return [];
+  }
+
+  if ((node as { appointmentId?: string }).appointmentId || (node as { patientName?: string }).patientName || (node as { appointmentKey?: string }).appointmentKey || (node as { date?: string }).date || (node as { slotStartTime?: string }).slotStartTime) {
+    return [{
+      appointmentId: (node as { appointmentId?: string }).appointmentId || path[path.length - 1] || '',
+      doctorId: (node as { doctorId?: string }).doctorId || branchDoctorId,
+      ...node,
+    }];
+  }
+
+  return Object.entries(node).flatMap(([childKey, childValue]) =>
+    collectAppointmentLeaves(childValue, branchDoctorId || childKey, [...path, childKey])
+  );
+};
+
 const normalizeAppointmentRecord = (
   id: string,
   value: Record<string, unknown>,
@@ -238,6 +268,7 @@ export const listenToAppointmentsByClinicAndDate = (
   clinicAliases.forEach((alias) => {
     const summaryKey = `summary:${alias}`;
     const nestedKey = `nested:${alias}`;
+    const doctorKey = `doctor:${alias}`;
 
     unsubs.push(onValue(ref(rtdb, appointmentSummaryPath(alias, date)), (snapshot) => {
       const data = snapshot.val() as Record<string, Record<string, unknown>> | null;
@@ -280,6 +311,31 @@ export const listenToAppointmentsByClinicAndDate = (
     }, (error) => {
       console.error('Error listening to nested appointments:', error);
       sourceItems.set(nestedKey, []);
+      emitMerged();
+    }));
+
+    unsubs.push(onValue(ref(rtdb, doctorAppointmentsPath(alias, '')), (snapshot) => {
+      const data = snapshot.val();
+
+      if (!data) {
+        sourceItems.set(doctorKey, []);
+        emitMerged();
+        return;
+      }
+
+      const doctorItems = collectAppointmentLeaves(data)
+        .map((item) => normalizeAppointmentRecord(
+          item.appointmentId,
+          item as Record<string, unknown>,
+          (item.date as string | undefined) || date
+        ))
+        .filter((item) => item.date === date);
+
+      sourceItems.set(doctorKey, doctorItems);
+      emitMerged();
+    }, (error) => {
+      console.error('Error listening to doctor appointments:', error);
+      sourceItems.set(doctorKey, []);
       emitMerged();
     }));
   });
@@ -539,14 +595,42 @@ export const confirmCheckInAndAddToQueue = async (
       updatedAt: serverTimestamp()
     });
 
+    const appointmentTime = appointment.appointmentTime || appointment.slotStartTime || '';
+
+    const doctorAppointmentRef = ref(rtdb, doctorAppointmentsPath(clinicId, doctorId, appointmentId));
+    await set(doctorAppointmentRef, stripUndefinedFields({
+      clinicId,
+      doctorId,
+      appointmentId,
+      patientId: appointment.patientId,
+      patientName: appointment.patientName,
+      patientPhone: appointment.patientPhone,
+      doctorName: appointment.doctorName,
+      date,
+      appointmentDate: appointment.appointmentDate || date,
+      appointmentTime,
+      slotStartTime: appointment.slotStartTime || appointmentTime,
+      slotEndTime: appointment.slotEndTime || appointmentTime,
+      slot: appointment.slotStartTime && appointment.slotEndTime ? `${appointment.slotStartTime} - ${appointment.slotEndTime}` : appointment.slotStartTime || appointmentTime,
+      appointmentKey: appointment.appointmentKey,
+      queueNumber: nextQueueNumber,
+      status: 'confirmed',
+      qrVerified: true,
+      checkedInAt: serverTimestamp(),
+      checkedInBy: receptionistId,
+      createdAt: appointment.createdAt || serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }));
+
     // Add to patient queue with the fields the queue screens actually use.
     const patientQueueRef = ref(rtdb, `patientQueue/${clinicId}/${doctorId}/${appointmentId}`);
-    const appointmentTime = appointment.appointmentTime || appointment.slotStartTime || '';
     const patientQueueRecord = stripUndefinedFields({
       clinicId,
       appointmentId,
       appointmentKey: appointment.appointmentKey,
+      patientId: appointment.patientId,
       patientName: appointment.patientName,
+      patientPhone: appointment.patientPhone,
       doctorId,
       doctorName: appointment.doctorName,
       date,
@@ -641,7 +725,9 @@ export const updateAppointmentStatus = async (
         clinicId,
         appointmentId,
         appointmentKey: appointment.appointmentKey,
+        patientId: appointment.patientId || '',
         patientName: appointment.patientName || '',
+        patientPhone: appointment.patientPhone || '',
         doctorId: appointment.doctorId || '',
         doctorName: appointment.doctorName || '',
         date,
@@ -656,6 +742,31 @@ export const updateAppointmentStatus = async (
         updatedAt: serverTimestamp(),
       }));
     }
+
+    const doctorAppointmentRef = ref(rtdb, doctorAppointmentsPath(clinicId, appointment.doctorId || '', appointmentId));
+    await update(doctorAppointmentRef, stripUndefinedFields({
+      clinicId,
+      doctorId: appointment.doctorId || '',
+      appointmentId,
+      patientId: appointment.patientId,
+      patientName: appointment.patientName || '',
+      patientPhone: appointment.patientPhone || '',
+      doctorName: appointment.doctorName || '',
+      date,
+      appointmentDate,
+      appointmentTime,
+      slotStartTime: appointment.slotStartTime || appointmentTime,
+      slotEndTime: appointment.slotEndTime || appointmentTime,
+      slot: appointment.slotStartTime && appointment.slotEndTime ? `${appointment.slotStartTime} - ${appointment.slotEndTime}` : appointment.slotStartTime || appointmentTime,
+      appointmentKey: appointment.appointmentKey,
+      status,
+      qrVerified: appointment.qrVerified,
+      queueNumber: appointment.queueNumber,
+      paymentStatus: status === 'confirmed' ? 'paid' : (appointment.paymentStatus || 'pending'),
+      checkedInAt: appointment.checkedInAt,
+      checkedInBy: appointment.checkedInBy,
+      updatedAt: serverTimestamp(),
+    }));
   } catch (error) {
     console.error("Error updating appointment status:", error);
     throw error;
@@ -703,7 +814,7 @@ export const listenToPatientQueue = (
         const linkedDoctorId = item.doctorId || item.branchDoctorId || '';
         const itemDate = item.date || item.appointmentDate || '';
 
-        if (itemDate !== date) return false;
+        if (date && itemDate !== date) return false;
         if (doctorId !== 'all' && doctorId && doctorId !== linkedDoctorId) return false;
         return true;
       })
@@ -749,6 +860,60 @@ export const listenToPatientQueue = (
   return () => {
     unsubscribers.forEach((unsubscribe) => unsubscribe());
   };
+};
+
+export const fetchPatientQueueSnapshot = async (
+  clinicId: string,
+  doctorId: string = 'all'
+): Promise<Appointment[]> => {
+  const clinicAliases = resolveClinicIds(clinicId);
+  const queueItems: Appointment[] = [];
+
+  const collectQueueLeaves = (
+    node: any,
+    branchDoctorId: string,
+    path: string[] = []
+  ): any[] => {
+    if (!node || typeof node !== 'object') {
+      return [];
+    }
+
+    if (node.appointmentId || node.patientName || node.appointmentKey || node.date || node.slotStartTime) {
+      return [{
+        appointmentId: node.appointmentId || path[path.length - 1] || '',
+        branchDoctorId,
+        ...node,
+      }];
+    }
+
+    return Object.entries(node).flatMap(([childKey, childValue]) =>
+      collectQueueLeaves(childValue, branchDoctorId || childKey, [...path, childKey])
+    );
+  };
+
+  for (const alias of clinicAliases) {
+    const snapshot = await get(ref(rtdb, doctorId && doctorId !== 'all'
+      ? `patientQueue/${alias}/${doctorId}`
+      : `patientQueue/${alias}`
+    ));
+
+    const data = snapshot.val();
+    if (!data) continue;
+
+    const items = doctorId && doctorId !== 'all'
+      ? collectQueueLeaves(data, doctorId)
+      : Object.entries(data).flatMap(([queueDoctorId, doctorQueue]: [string, any]) =>
+          collectQueueLeaves(doctorQueue, queueDoctorId)
+        );
+
+    queueItems.push(...items.map((item) => ({
+      ...item,
+      appointmentId: item.appointmentId || item.id || '',
+      doctorId: item.doctorId || item.branchDoctorId || '',
+    } as Appointment)));
+  }
+
+  return queueItems.sort((a, b) => (a.queueNumber || 0) - (b.queueNumber || 0));
 };
 
 /**

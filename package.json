@@ -8,7 +8,9 @@
     "build": "next build",
     "start": "next start --port=3000 --hostname=0.0.0.0",
     "clean": "rm -rf .next dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "queue:debug": "tsx scripts/debug-patient-queue.ts",
+    "queue:probe": "tsx scripts/debug-patient-queue.ts demo-clinic-1 all write"
   },
   "dependencies": {
     "@babel/runtime": "^7.29.2",
