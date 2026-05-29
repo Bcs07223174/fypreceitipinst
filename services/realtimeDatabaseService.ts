@@ -13,7 +13,7 @@ import {
   Unsubscribe
 } from 'firebase/database';
 import { rtdb } from '../lib/firebase';
-import { Appointment, AppointmentStatus, DashboardDailySummary } from '../types';
+import { Appointment, AppointmentStatus, DashboardDailySummary, DoctorSchedule, DoctorScheduleDay } from '../styles/types';
 
 type AppointmentSummary = Pick<
   Appointment,
@@ -167,6 +167,67 @@ const normalizeAppointmentRecord = (
   } as Appointment;
 };
 
+const normalizeDoctorScheduleDay = (value: Record<string, unknown>): DoctorScheduleDay => ({
+  dateOfWeek: String(value.dateOfWeek || ''),
+  dayOfWeek: String(value.dayOfWeek || ''),
+  morningSlots: Array.isArray(value.morningSlots) ? value.morningSlots.map((slot) => String(slot)).filter(Boolean) : [],
+  eveningSlots: Array.isArray(value.eveningSlots) ? value.eveningSlots.map((slot) => String(slot)).filter(Boolean) : [],
+  isOffDay: Boolean(value.isOffDay),
+  slotDuration: value.slotDuration ? String(value.slotDuration) : undefined,
+});
+
+const collectDoctorScheduleLeaves = (
+  node: any,
+  path: string[] = []
+): Array<{ scheduleId: string; [key: string]: unknown }> => {
+  if (!node || typeof node !== 'object') {
+    return [];
+  }
+
+  if ((node as { doctorId?: string }).doctorId || (node as { doctor_id?: string }).doctor_id || Array.isArray((node as { days?: unknown }).days)) {
+    return [{
+      scheduleId: (node as { id?: string; scheduleId?: string }).id || (node as { scheduleId?: string }).scheduleId || path[path.length - 1] || '',
+      ...node,
+    }];
+  }
+
+  return Object.entries(node).flatMap(([childKey, childValue]) =>
+    collectDoctorScheduleLeaves(childValue, [...path, childKey])
+  );
+};
+
+const normalizeDoctorScheduleRecord = (id: string, value: Record<string, unknown>): DoctorSchedule => ({
+  id: String(value.id || value.scheduleId || id),
+  doctorId: String(value.doctorId || value.doctor_id || ''),
+  doctor_id: value.doctor_id ? String(value.doctor_id) : String(value.doctorId || ''),
+  clinicId: value.clinicId ? String(value.clinicId) : undefined,
+  weekStart: value.weekStart ? String(value.weekStart) : undefined,
+  weekEnd: value.weekEnd ? String(value.weekEnd) : undefined,
+  totalSlots: typeof value.totalSlots === 'number' ? value.totalSlots : Number(value.totalSlots || 0) || undefined,
+  createdAt: value.createdAt,
+  updatedAt: value.updatedAt,
+  // Support both array-of-days and object-mapped days keyed by date (e.g. { "2026-05-19": { ... } })
+  days: ((): DoctorScheduleDay[] => {
+    if (Array.isArray(value.days)) {
+      return value.days.map((day) => normalizeDoctorScheduleDay(day as Record<string, unknown>));
+    }
+
+    if (value.days && typeof value.days === 'object') {
+      return Object.entries(value.days as Record<string, unknown>).map(([key, dayValue]) => {
+        const dayRecord = normalizeDoctorScheduleDay((dayValue as Record<string, unknown>) || {});
+        // If the day object doesn't contain a dateOfWeek/dayOfWeek, use the key as dateOfWeek
+        return {
+          ...dayRecord,
+          dateOfWeek: String(dayRecord.dateOfWeek || key || ''),
+          dayOfWeek: String(dayRecord.dayOfWeek || key || ''),
+        } as DoctorScheduleDay;
+      });
+    }
+
+    return [];
+  })(),
+});
+
 const computeDashboardSummary = (items: AppointmentSummary[]): DashboardDailySummary => {
   const summary = emptyDashboardSummary();
   summary.todayAppointments = items.length;
@@ -211,6 +272,40 @@ export const refreshDashboardSummary = async (clinicId: string, date: string): P
     ...summary,
     updatedAt: serverTimestamp(),
   });
+};
+
+export const getDoctorSchedulesByLinkedDoctorIds = async (doctorIds: string[]): Promise<DoctorSchedule[]> => {
+  if (doctorIds.length === 0) return [];
+
+  try {
+    // Try primary path first, then a legacy alternate key if present in some DBs (e.g. 'doctor_schedulesJ')
+    let schedulesSnapshot = await get(ref(rtdb, 'doctor_schedules'));
+    let data = schedulesSnapshot.val();
+    if (!data) {
+      // legacy/alternate path
+      schedulesSnapshot = await get(ref(rtdb, 'doctor_schedulesJ'));
+      data = schedulesSnapshot.val();
+      if (data) {
+        if (process.env.NODE_ENV !== 'production') console.debug('Loaded doctor schedules from alternate path: doctor_schedulesJ');
+      }
+    }
+    const requestedIds = doctorIds.map((value) => normalizeDoctorId(value));
+
+    return collectDoctorScheduleLeaves(data)
+      .map((item) => normalizeDoctorScheduleRecord(item.scheduleId, item as Record<string, unknown>))
+      .filter((schedule) => {
+        const scheduleIds = [schedule.doctorId, schedule.doctor_id].map((value) => normalizeDoctorId(value));
+        return scheduleIds.some((id) => requestedIds.includes(id));
+      })
+      .sort((a, b) => {
+        const aTime = new Date(String(a.createdAt || 0)).getTime() || 0;
+        const bTime = new Date(String(b.createdAt || 0)).getTime() || 0;
+        return bTime - aTime;
+      });
+  } catch (error) {
+    console.error('Error fetching doctor schedules:', error);
+    return [];
+  }
 };
 
 export const listenToDashboardSummary = (
@@ -769,6 +864,95 @@ export const updateAppointmentStatus = async (
     }));
   } catch (error) {
     console.error("Error updating appointment status:", error);
+    throw error;
+  }
+};
+
+export const updateAppointmentPaymentStatus = async (
+  clinicId: string,
+  appointmentId: string,
+  appointment: Appointment,
+  paymentStatus: 'pending' | 'paid' | 'failed'
+): Promise<void> => {
+  try {
+    const date = appointment.date || appointment.appointmentDate || '';
+    const appointmentDate = appointment.appointmentDate || date;
+    const appointmentTime = appointment.appointmentTime || appointment.slotStartTime || '';
+    const appointmentRef = ref(rtdb, `appointments/${clinicId}/${date}/${appointmentId}`);
+    const flatAppointmentRef = ref(rtdb, `appointments/${appointmentId}`);
+
+    await update(appointmentRef, {
+      paymentStatus,
+      appointmentDate,
+      appointmentTime,
+      updatedAt: serverTimestamp(),
+    });
+
+    await update(
+      flatAppointmentRef,
+      Object.fromEntries(
+        Object.entries({
+          ...appointment,
+          clinicId,
+          date,
+          appointmentDate,
+          appointmentTime,
+          slotStartTime: appointment.slotStartTime || appointmentTime,
+          slotEndTime: appointment.slotEndTime || appointmentTime,
+          paymentStatus,
+          updatedAt: serverTimestamp(),
+        }).filter(([, value]) => value !== undefined)
+      )
+    );
+
+    const summaryRef = ref(rtdb, appointmentSummaryPath(clinicId, date, appointmentId));
+    const summaryAppointmentTime = (appointment.slotStartTime && appointment.slotEndTime)
+      ? `${appointment.slotStartTime} - ${appointment.slotEndTime}`
+      : (appointment.slotStartTime || (appointment as any).appointmentTime || '');
+
+    await update(summaryRef, stripUndefinedFields({
+      paymentStatus,
+      patientName: appointment.patientName || '',
+      appointmentTime: summaryAppointmentTime,
+      updatedAt: serverTimestamp(),
+    }));
+
+    if (appointment.doctorId) {
+      const doctorAppointmentRef = ref(rtdb, doctorAppointmentsPath(clinicId, appointment.doctorId, appointmentId));
+      await update(doctorAppointmentRef, stripUndefinedFields({
+        clinicId,
+        doctorId: appointment.doctorId,
+        appointmentId,
+        patientId: appointment.patientId,
+        patientName: appointment.patientName || '',
+        patientPhone: appointment.patientPhone || '',
+        doctorName: appointment.doctorName || '',
+        date,
+        appointmentDate,
+        appointmentTime,
+        slotStartTime: appointment.slotStartTime || appointmentTime,
+        slotEndTime: appointment.slotEndTime || appointmentTime,
+        slot: appointment.slotStartTime && appointment.slotEndTime ? `${appointment.slotStartTime} - ${appointment.slotEndTime}` : appointment.slotStartTime || appointmentTime,
+        appointmentKey: appointment.appointmentKey,
+        status: appointment.status,
+        qrVerified: appointment.qrVerified,
+        queueNumber: appointment.queueNumber,
+        paymentStatus,
+        checkedInAt: appointment.checkedInAt,
+        checkedInBy: appointment.checkedInBy,
+        updatedAt: serverTimestamp(),
+      }));
+    }
+
+    if (appointment.doctorId) {
+      const patientQueueRef = ref(rtdb, `patientQueue/${clinicId}/${appointment.doctorId}/${appointmentId}`);
+      await update(patientQueueRef, stripUndefinedFields({
+        paymentStatus,
+        updatedAt: serverTimestamp(),
+      })).catch(() => {});
+    }
+  } catch (error) {
+    console.error('Error updating appointment payment status:', error);
     throw error;
   }
 };

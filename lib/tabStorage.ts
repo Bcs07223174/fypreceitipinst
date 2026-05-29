@@ -1,5 +1,16 @@
 const STORAGE_KEY = 'medicare_open_tabs_v1';
 
+const TAB_LABELS: Record<string, string> = {
+  '/': 'Dashboard',
+  '/scan': 'QR Scanner',
+  '/appointments': 'Appointments',
+  '/patient-booking': 'Patient Booking',
+  '/queue': 'Patient Queue',
+  '/profile': 'Profile',
+};
+
+export const getTabLabel = (path: string): string => TAB_LABELS[path] || path.replace('/', '') || 'Dashboard';
+
 export const getOpenTabs = (): string[] => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -36,6 +47,7 @@ export const clearOpenTabs = () => {
 };
 
 export default {
+  getTabLabel,
   getOpenTabs,
   saveOpenTabs,
   addOpenTab,

@@ -10,7 +10,8 @@
     "clean": "rm -rf .next dist",
     "lint": "tsc --noEmit",
     "queue:debug": "tsx scripts/debug-patient-queue.ts",
-    "queue:probe": "tsx scripts/debug-patient-queue.ts demo-clinic-1 all write"
+    "queue:probe": "tsx scripts/debug-patient-queue.ts demo-clinic-1 all write",
+    "schedule:debug": "tsx scripts/debug-doctor-schedule.ts"
   },
   "dependencies": {
     "@babel/runtime": "^7.29.2",

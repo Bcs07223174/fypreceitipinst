@@ -11,7 +11,7 @@ import {
 import { collection, doc, getDoc, getDocs, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase';
 import { toLocalDateKey } from '../lib/date';
-import { UserProfile } from '../types';
+import { UserProfile } from '../styles/types';
 import { createAppointment } from './realtimeDatabaseService';
 
 const googleProvider = new GoogleAuthProvider();

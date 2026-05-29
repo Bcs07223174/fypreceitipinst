@@ -2,16 +2,16 @@ import { useEffect, useState } from 'react';
 import { 
   Calendar, 
   Search, 
-  Filter, 
   MoreVertical, 
   CheckCircle, 
   XCircle,
   Clock,
-  User,
-  ExternalLink
+  BadgeCheck,
+  ChevronDown,
+  AlertCircle
 } from 'lucide-react';
-import { UserProfile, Appointment, AppointmentStatus, DoctorProfile } from '../../types';
-import { getReceptionistProfile, getAppointmentsByDate, updateAppointmentStatus, getAssignedDoctors } from '../../services/clinicService';
+import { UserProfile, Appointment, AppointmentStatus, DoctorProfile } from '../../styles/types';
+import { getReceptionistProfile, getAppointmentsByDate, updateAppointmentStatus, getAssignedDoctors, updateAppointmentPaymentStatus } from '../../services/clinicService';
 import { format, addDays, parseISO } from 'date-fns';
 
 interface AppointmentListProps {
@@ -32,6 +32,7 @@ export default function AppointmentList({ profile }: AppointmentListProps) {
   const [assignedDoctorIds, setAssignedDoctorIds] = useState<string[]>([]);
 
   const [keyMessage, setKeyMessage] = useState<{ type: 'success' | 'error' | null; text: string }>({ type: null, text: '' });
+  const [paymentConfirm, setPaymentConfirm] = useState<{ appointment: Appointment; nextStatus: 'pending' | 'paid' | 'failed' } | null>(null);
 
   const toDateKey = (value: string) => {
     if (!value) return '';
@@ -43,6 +44,20 @@ export default function AppointmentList({ profile }: AppointmentListProps) {
   const normalizeDoctorId = (value: string | number | null | undefined) => String(value ?? '').trim().replace(/_/g, '-').toLowerCase();
   const getAppointmentDate = (app: Appointment) => app.appointmentDate || app.date || '';
   const getAppointmentTime = (app: Appointment) => app.appointmentTime || app.slotStartTime || '';
+
+  const getCanonicalDoctorKey = (doctor: DoctorProfile | null | undefined) => {
+    if (!doctor) return '';
+
+    return String(
+      doctor.doctorId ||
+      doctor.firebaseUid ||
+      doctor.uid ||
+      doctor.doctorName ||
+      doctor.name ||
+      doctor.fullName ||
+      ''
+    ).trim();
+  };
 
   useEffect(() => {
     let unsub: (() => void) | undefined;
@@ -231,6 +246,41 @@ export default function AppointmentList({ profile }: AppointmentListProps) {
     }
   };
 
+  const handlePaymentChange = (appointment: Appointment, nextStatus: 'pending' | 'paid' | 'failed') => {
+    if (nextStatus === appointment.paymentStatus) return;
+
+    if (nextStatus === 'paid') {
+      setPaymentConfirm({ appointment, nextStatus });
+      return;
+    }
+
+    if (!profile) return;
+    updateAppointmentPaymentStatus(profile.clinicId, appointment.id, appointment, nextStatus).catch((err) => {
+      console.error(err);
+      setKeyMessage({ type: 'error', text: 'Failed to update payment status' });
+    });
+  };
+
+  const confirmPaymentChange = async () => {
+    if (!profile || !paymentConfirm) return;
+
+    try {
+      await updateAppointmentPaymentStatus(
+        profile.clinicId,
+        paymentConfirm.appointment.id,
+        paymentConfirm.appointment,
+        paymentConfirm.nextStatus,
+      );
+      setKeyMessage({ type: 'success', text: `Marked payment as paid for ${paymentConfirm.appointment.patientName}` });
+      setTimeout(() => setKeyMessage({ type: null, text: '' }), 3000);
+    } catch (err) {
+      console.error(err);
+      setKeyMessage({ type: 'error', text: 'Failed to confirm payment' });
+    } finally {
+      setPaymentConfirm(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -268,7 +318,6 @@ export default function AppointmentList({ profile }: AppointmentListProps) {
           />
         </div>
         <div className="flex items-center gap-2">
-          <Filter className="text-slate-400" size={18} />
           <span className="text-xs font-semibold text-slate-500">Linked Doctor</span>
           <select
             className="rounded-xl bg-slate-50 px-4 py-2 text-sm outline-none"
@@ -277,7 +326,7 @@ export default function AppointmentList({ profile }: AppointmentListProps) {
           >
             <option value="all">All Doctors</option>
             {doctors.map(d => (
-              <option key={d.uid} value={d.uid}>{d.fullName}</option>
+              <option key={getCanonicalDoctorKey(d) || d.uid} value={getCanonicalDoctorKey(d) || d.uid}>{d.fullName}</option>
             ))}
           </select>
           <select 
@@ -305,167 +354,192 @@ export default function AppointmentList({ profile }: AppointmentListProps) {
         </div>
       </div>
 
-      {/* Table */}
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="overflow-x-auto">
-          <table className="w-full text-left">
-            <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
-              <tr>
-                <th className="px-6 py-4">Key</th>
-                <th className="px-6 py-4">Patient</th>
-                <th className="px-6 py-4">Doctor</th>
-                <th className="px-6 py-4">Time Slot</th>
-                <th className="px-6 py-4">Status</th>
-                                <th className="px-6 py-4">Payment</th>
-                <th className="px-6 py-4 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {isBusy ? (
+            <table className="w-full text-left">
+              <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
                 <tr>
-                  <td colSpan={7} className="py-20 text-center">
-                    <div className="flex flex-col items-center gap-3 text-slate-400">
-                      <div className="h-10 w-10 animate-spin rounded-full border-4 border-sky-200 border-t-sky-500" />
-                      <p className="text-sm font-medium">Loading appointments...</p>
-                    </div>
-                  </td>
+                  <th className="px-6 py-4">Key</th>
+                  <th className="px-6 py-4">Patient</th>
+                  <th className="px-6 py-4">Doctor</th>
+                  <th className="px-6 py-4">Time Slot</th>
+                  <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Payment</th>
+                  <th className="px-6 py-4 text-right">Actions</th>
                 </tr>
-              ) : finalFiltered.map((app) => (
-                <tr key={app.id} className="group hover:bg-slate-50/50">
-                  <td className="px-6 py-4">
-                    <input
-                      type="text"
-                      defaultValue={app.appointmentKey || ''}
-                      placeholder="Enter key"
-                      onKeyDown={async (e) => {
-                        if (e.key !== 'Enter') return;
-                        const val = (e.target as HTMLInputElement).value.trim();
-                        if (!val) {
-                          setKeyMessage({ type: 'error', text: 'Please enter a key' });
-                          return;
-                        }
-                        const match = val.toLowerCase() === (app.appointmentKey || '').toLowerCase() ||
-                          val.toLowerCase() === app.id.toLowerCase() ||
-                          app.id.toLowerCase().includes(val.toLowerCase());
-                        if (!match) {
-                          setKeyMessage({ type: 'error', text: 'Key does not match this booking' });
-                          return;
-                        }
-                        if (!profile) return;
-                        try {
-                          await updateAppointmentStatus(profile.clinicId, app.id, app, 'confirmed');
-                          setKeyMessage({ type: 'success', text: `Payment confirmed for Booking #${app.id.slice(0,8)}` });
-                          setTimeout(() => setKeyMessage({ type: null, text: '' }), 3000);
-                        } catch (err) {
-                          console.error(err);
-                          setKeyMessage({ type: 'error', text: 'Failed to confirm payment' });
-                        }
-                      }}
-                      className="w-full rounded-xl bg-slate-50 px-3 py-2 text-sm outline-none border border-slate-200 focus:border-blue-400"
-                    />
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="flex items-center gap-3">
-                      <div className="h-8 w-8 rounded-full bg-sky-50 flex items-center justify-center text-sky-600 font-bold text-xs">
-                        {app.patientName?.[0] || 'P'}
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {isBusy ? (
+                  <tr>
+                    <td colSpan={7} className="py-20 text-center">
+                      <div className="flex flex-col items-center gap-3 text-slate-400">
+                        <div className="h-10 w-10 animate-spin rounded-full border-4 border-sky-200 border-t-sky-500" />
+                        <p className="text-sm font-medium">Loading appointments...</p>
                       </div>
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">{app.patientName}</p>
-                        <p className="text-xs text-slate-500">{app.patientPhone}</p>
+                    </td>
+                  </tr>
+                ) : finalFiltered.map((app) => (
+                  <tr key={app.id} className="group hover:bg-slate-50/50">
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                        {app.paymentStatus === 'paid' ? (
+                          <BadgeCheck size={16} className="shrink-0 text-emerald-600" />
+                        ) : (
+                          <AlertCircle size={16} className="shrink-0 text-amber-500" />
+                        )}
+                        <select
+                          value={app.paymentStatus || 'pending'}
+                          onChange={(e) => handlePaymentChange(app, e.target.value as 'pending' | 'paid' | 'failed')}
+                          className="w-full bg-transparent text-sm font-semibold capitalize outline-none"
+                        >
+                          <option value="pending">Pending</option>
+                          <option value="paid">Paid</option>
+                          <option value="failed">Failed</option>
+                        </select>
+                        <ChevronDown size={14} className="shrink-0 text-slate-400" />
                       </div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4">
-                    <p className="text-sm font-medium text-slate-700">{app.doctorName}</p>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="flex items-center gap-2 text-slate-600">
-                      <Clock size={14} />
-                      <span className="text-sm">
-                        {getAppointmentTime(app) || `${app.slotStartTime} - ${app.slotEndTime}`}
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-3">
+                        <div className="h-8 w-8 rounded-full bg-sky-50 flex items-center justify-center text-sky-600 font-bold text-xs">
+                          {app.patientName?.[0] || 'P'}
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold text-slate-900">{app.patientName}</p>
+                          <p className="text-xs text-slate-500">{app.patientPhone}</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <p className="text-sm font-medium text-slate-700">{app.doctorName}</p>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-2 text-slate-600">
+                        <Clock size={14} />
+                        <span className="text-sm">
+                          {getAppointmentTime(app) || `${app.slotStartTime} - ${app.slotEndTime}`}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase ${
+                        getStatusColor(app.status)
+                      }`}>
+                        {app.status.replace('_', ' ')}
                       </span>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase ${
-                      getStatusColor(app.status)
-                    }`}>
-                      {app.status.replace('_', ' ')}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase ${
-                      app.paymentStatus === 'paid'
-                        ? 'bg-green-100 text-green-800'
-                        : 'bg-amber-100 text-amber-800'
-                    }`}>
-                      {app.paymentStatus || 'pending'}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <div className="flex items-center justify-end gap-2">
-                      {(() => {
-                        const actionEnabled = ['pending', 'booked', 'confirmed'].includes((app.status || '').toLowerCase());
-                        return (
-                          <>
-                       <button 
-                        title="Confirm"
-                        disabled={!actionEnabled}
-                        onClick={() => handleStatusChange(app, 'confirmed')}
-                        className="rounded-lg p-1.5 text-green-600 hover:bg-green-50 disabled:opacity-30"
-                       >
-                         <CheckCircle size={18} />
-                       </button>
-                       <button 
-                        title="Cancel"
-                        disabled={!actionEnabled}
-                        onClick={() => handleStatusChange(app, 'cancelled')}
-                        className="rounded-lg p-1.5 text-red-600 hover:bg-red-50 disabled:opacity-30"
-                       >
-                         <XCircle size={18} />
-                       </button>
-                          </>
-                        );
-                      })()}
-                       <button className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-900">
-                         <MoreVertical size={18} />
-                       </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {finalFiltered.length === 0 && !loading && !error && (
-                <tr>
-                  <td colSpan={7} className="py-20 text-center">
-                    <div className="flex flex-col items-center gap-2 text-slate-400">
-                      <Calendar size={48} className="opacity-20" />
-                      {afterDateFilter.length === 0 && hasAssignedDoctors ? (
-                        <p className="text-sm font-medium">
-                          No appointments found for assigned doctors on {selectedDateLabel}.
-                        </p>
-                      ) : afterDateFilter.length === 0 ? (
-                        <p className="text-sm font-medium">
-                          No appointments found for selected date {selectedDateLabel}.
-                        </p>
-                      ) : afterAssignedFilter.length === 0 ? (
-                        <p className="text-sm font-medium">
-                          No appointments found for your assigned doctors on {toDateKey(date)}. Check doctor assignment or clear filters.
-                        </p>
-                      ) : hasActiveFilters ? (
-                        <p className="text-sm font-medium">
-                          No appointments match the selected date and current filters.
-                        </p>
-                      ) : (
-                        <p className="text-sm font-medium">No appointments found for selected date {selectedDateLabel}.</p>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase ${
+                        app.paymentStatus === 'paid'
+                          ? 'bg-green-100 text-green-800'
+                          : 'bg-amber-100 text-amber-800'
+                      }`}>
+                        {app.paymentStatus || 'pending'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        {(() => {
+                          const actionEnabled = ['pending', 'booked', 'confirmed'].includes((app.status || '').toLowerCase());
+                          return (
+                            <>
+                          <button 
+                           title="Confirm"
+                           disabled={!actionEnabled}
+                           onClick={() => handleStatusChange(app, 'confirmed')}
+                           className="rounded-lg p-1.5 text-green-600 hover:bg-green-50 disabled:opacity-30"
+                          >
+                            <CheckCircle size={18} />
+                          </button>
+                          <button 
+                           title="Cancel"
+                           disabled={!actionEnabled}
+                           onClick={() => handleStatusChange(app, 'cancelled')}
+                           className="rounded-lg p-1.5 text-red-600 hover:bg-red-50 disabled:opacity-30"
+                          >
+                            <XCircle size={18} />
+                          </button>
+                            </>
+                          );
+                        })()}
+                         <button className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-900">
+                           <MoreVertical size={18} />
+                         </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {finalFiltered.length === 0 && !loading && !error && (
+                  <tr>
+                    <td colSpan={7} className="py-20 text-center">
+                      <div className="flex flex-col items-center gap-2 text-slate-400">
+                        <Calendar size={48} className="opacity-20" />
+                        {afterDateFilter.length === 0 && hasAssignedDoctors ? (
+                          <p className="text-sm font-medium">
+                            No appointments found for assigned doctors on {selectedDateLabel}.
+                          </p>
+                        ) : afterDateFilter.length === 0 ? (
+                          <p className="text-sm font-medium">
+                            No appointments found for selected date {selectedDateLabel}.
+                          </p>
+                        ) : afterAssignedFilter.length === 0 ? (
+                          <p className="text-sm font-medium">
+                            No appointments found for your assigned doctors on {toDateKey(date)}. Check doctor assignment or clear filters.
+                          </p>
+                        ) : hasActiveFilters ? (
+                          <p className="text-sm font-medium">
+                            No appointments match the selected date and current filters.
+                          </p>
+                        ) : (
+                          <p className="text-sm font-medium">No appointments found for selected date {selectedDateLabel}.</p>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
       </div>
+
+      {paymentConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl">
+            <div className="mb-4 flex items-center gap-3">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600">
+                <BadgeCheck size={24} />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Confirm payment</h3>
+                <p className="text-sm text-slate-500">Mark this appointment as paid?</p>
+              </div>
+            </div>
+
+            <div className="mb-5 rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">
+              <p className="font-semibold text-slate-900">{paymentConfirm.appointment.patientName}</p>
+              <p>{paymentConfirm.appointment.doctorName}</p>
+              <p>{paymentConfirm.appointment.appointmentKey || paymentConfirm.appointment.id}</p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setPaymentConfirm(null)}
+                className="flex-1 rounded-2xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmPaymentChange}
+                className="flex-1 rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700"
+              >
+                Confirm Paid
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      
     </div>
   );
 }

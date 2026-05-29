@@ -8,17 +8,19 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { handleFirestoreError, OperationType } from '../lib/firestoreErrorHandler';
-import { Appointment, DoctorProfile, ReceptionistProfile, AppointmentStatus, DashboardDailySummary } from '../types';
+import { Appointment, DoctorProfile, ReceptionistProfile, AppointmentStatus, DashboardDailySummary } from '../styles/types';
 import {
   listenToAppointmentsByClinicAndDate,
   confirmCheckInAndAddToQueue,
   updateAppointmentStatus as updateRTDBAppointmentStatus,
+  updateAppointmentPaymentStatus as updateRTDBAppointmentPaymentStatus,
   listenToPatientQueue,
   fetchPatientQueueSnapshot,
   createAppointment,
   getAppointmentByKey,
   listenToDashboardSummary,
   refreshDashboardSummary,
+  getDoctorSchedulesByLinkedDoctorIds,
 } from './realtimeDatabaseService';
 
 const normalizeDoctorIds = (value: unknown): string[] => {
@@ -314,6 +316,20 @@ export const updateAppointmentStatus = async (
   }
 };
 
+export const updateAppointmentPaymentStatus = async (
+  clinicId: string,
+  appointmentId: string,
+  appointment: Appointment,
+  paymentStatus: 'pending' | 'paid' | 'failed'
+) => {
+  try {
+    await updateRTDBAppointmentPaymentStatus(clinicId, appointmentId, appointment, paymentStatus);
+  } catch (error) {
+    console.error('Error updating appointment payment status:', error);
+    throw error;
+  }
+};
+
 /**
  * Listen to patient queue for a specific doctor
  */
@@ -348,3 +364,23 @@ export const rebuildDashboardSummary = async (
   await refreshDashboardSummary(clinicId, date);
 };
 
+export const getDoctorSchedulesForLinkedDoctors = async (doctorIds: string[]) => {
+  return getDoctorSchedulesByLinkedDoctorIds(doctorIds);
+};
+
+export const createReceptionistAppointment = async (
+  clinicId: string,
+  date: string,
+  appointmentData: Omit<Appointment, 'id' | 'date' | 'clinicId' | 'createdAt' | 'updatedAt'>
+): Promise<string> => {
+  const appointmentId = `reception-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  await createAppointment(clinicId, date, appointmentId, {
+    ...appointmentData,
+    clinicId,
+    createdAt: null,
+    updatedAt: null,
+  });
+
+  return appointmentId;
+};

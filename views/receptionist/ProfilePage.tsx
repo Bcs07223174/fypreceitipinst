@@ -10,8 +10,10 @@ import {
   Save,
   Clock
 } from 'lucide-react';
-import { UserProfile, ReceptionistProfile, DoctorProfile } from '../../types';
+import { UserProfile, ReceptionistProfile, DoctorProfile } from '../../styles/types';
 import { getReceptionistProfile, getAssignedDoctors } from '../../services/clinicService';
+import { logout } from '../../services/authService';
+import { useRouter } from 'next/navigation';
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 
@@ -30,6 +32,8 @@ export default function ProfilePage({ profile }: ProfilePageProps) {
     gender: 'Other'
   });
   const [saving, setSaving] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const router = useRouter();
   const linkedDoctorCount = rec?.assignedDoctorIds.length || 0;
   const missingDoctorCount = Math.max(linkedDoctorCount - doctors.length, 0);
 
@@ -273,7 +277,26 @@ export default function ProfilePage({ profile }: ProfilePageProps) {
                 <p className="text-xs text-slate-500">Last security check performed 2 days ago.</p>
               </div>
             </div>
-            <button className="text-sm font-bold text-sky-600 hover:underline">Change Password</button>
+            <div className="flex items-center gap-3">
+              <button className="text-sm font-bold text-sky-600 hover:underline">Change Password</button>
+              <button
+                onClick={async () => {
+                  try {
+                    setSigningOut(true);
+                    await logout();
+                    // Redirect to home/login
+                    router.push('/');
+                  } catch (err) {
+                    console.error('Logout failed', err);
+                    setSigningOut(false);
+                  }
+                }}
+                disabled={signingOut}
+                className="text-sm font-bold text-rose-600 hover:underline"
+              >
+                {signingOut ? 'Signing out...' : 'Sign Out'}
+              </button>
+            </div>
           </div>
         </div>
       </div>

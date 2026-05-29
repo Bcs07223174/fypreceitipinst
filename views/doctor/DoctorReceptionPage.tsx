@@ -13,7 +13,7 @@ import {
   Stethoscope,
   Users
 } from 'lucide-react';
-import { UserProfile, Appointment } from '../../types';
+import { UserProfile, Appointment } from '../../styles/types';
 import { logout, getUserProfile } from '../../services/authService';
 import { listenToAppointmentsByClinicAndDate, updateAppointmentStatus } from '../../services/realtimeDatabaseService';
 import { doc, getDoc } from 'firebase/firestore';

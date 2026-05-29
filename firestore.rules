@@ -52,11 +52,38 @@ service cloud.firestore {
 
     match /appointments/{appointmentId} {
       allow read: if isSignedIn() && (belongsToClinic(resource.data.clinicId) || resource.data.patientId == request.auth.uid);
-      allow create: if isSignedIn() && belongsToClinic(incoming().clinicId) && isValidAppointment(incoming());
+      allow create: if isSignedIn() && (
+        (incoming().clinicId is string && belongsToClinic(incoming().clinicId) && isValidAppointment(incoming())) ||
+        incoming().patientId == request.auth.uid
+      );
       allow update: if isSignedIn() && (
         (belongsToClinic(existing().clinicId) && isReceptionist()) || 
         (existing().patientId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status']))
       );
+    }
+
+    match /doctors/{doctorId} {
+      allow read: if isSignedIn();
+    }
+
+    match /doctor_schedules/{scheduleId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    match /slotLocks/{slotId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && incoming().patientId == request.auth.uid;
+      allow update: if isSignedIn() &&
+        incoming().patientId == request.auth.uid &&
+        (existing().patientId == request.auth.uid || existing().expiresAt < request.time);
+      allow delete: if isSignedIn() && existing().patientId == request.auth.uid;
+    }
+
+    match /bookedSlots/{slotId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && !exists(/databases/$(database)/documents/bookedSlots/$(slotId));
+      allow update, delete: if false;
     }
 
     match /clinics/{clinicId} {

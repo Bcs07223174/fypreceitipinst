@@ -1,19 +1,81 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState, Component } from 'react';
 import { User as FirebaseUser } from 'firebase/auth';
 
 import { observeAuth, resolveAuthenticatedUserProfile, logout } from '../services/authService';
-import { UserProfile } from '../types';
+import { UserProfile } from '../styles/types';
 
-const LoginPage = lazy(() => import('../views/receptionist/LoginPage'));
-const Dashboard = lazy(() => import('../views/receptionist/Dashboard'));
-const QRScannerPage = lazy(() => import('../views/receptionist/QRScannerPage'));
-const AppointmentList = lazy(() => import('../views/receptionist/AppointmentList'));
-const QueueManagement = lazy(() => import('../views/receptionist/QueueManagement'));
-const ProfilePage = lazy(() => import('../views/receptionist/ProfilePage'));
-const Layout = lazy(() => import('./Layout'));
-const DebugPage = lazy(() => import('../views/DebugPage'));
-const DoctorReceptionPage = lazy(() => import('../views/doctor/DoctorReceptionPage'));
+const LAZY_RETRY_FLAG = 'lazy-route-retry-attempted';
+
+function lazyWithRetry<T extends { default: React.ComponentType<any> }>(factory: () => Promise<T>) {
+  return lazy(async () => {
+    try {
+      return await factory();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isChunkError = message.includes('ChunkLoadError') || message.includes('Loading chunk');
+
+      if (typeof window !== 'undefined' && isChunkError && !window.sessionStorage.getItem(LAZY_RETRY_FLAG)) {
+        window.sessionStorage.setItem(LAZY_RETRY_FLAG, 'true');
+        window.location.reload();
+      }
+
+      throw error;
+    }
+  });
+}
+
+const LoginPage = lazyWithRetry(() => import('../views/receptionist/LoginPage'));
+const Dashboard = lazyWithRetry(() => import('../views/receptionist/Dashboard'));
+const QRScannerPage = lazyWithRetry(() => import('../views/receptionist/QRScannerPage'));
+const AppointmentList = lazyWithRetry(() => import('../views/receptionist/AppointmentList'));
+const PatientBookingArchitecture = lazyWithRetry(() => import('../views/receptionist/PatientBookingArchitecture'));
+const QueueManagement = lazyWithRetry(() => import('../views/receptionist/QueueManagement'));
+const ProfilePage = lazyWithRetry(() => import('../views/receptionist/ProfilePage'));
+const Layout = lazyWithRetry(() => import('./Layout'));
+const DebugPage = lazyWithRetry(() => import('../views/DebugPage'));
+const DoctorReceptionPage = lazyWithRetry(() => import('../views/doctor/DoctorReceptionPage'));
+
+class RouteChunkBoundary extends Component<{ children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
+  state = { hasError: false, error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error) {
+    const message = error.message || String(error);
+    const isChunkError = message.includes('ChunkLoadError') || message.includes('Loading chunk');
+
+    if (typeof window !== 'undefined' && isChunkError && !window.sessionStorage.getItem(LAZY_RETRY_FLAG)) {
+      window.sessionStorage.setItem(LAZY_RETRY_FLAG, 'true');
+      window.location.reload();
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
+          <div className="max-w-md rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-lg">
+            <h1 className="text-xl font-bold text-slate-900">Route failed to load</h1>
+            <p className="mt-3 text-sm text-slate-500">
+              The page chunk could not be loaded. Reloading usually clears a stale development chunk.
+            </p>
+            <button
+              onClick={() => window.location.reload()}
+              className="mt-6 rounded-2xl bg-sky-600 px-5 py-3 text-sm font-semibold text-white hover:bg-sky-700"
+            >
+              Reload page
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 function RouteFallback() {
   return (
@@ -75,8 +137,9 @@ export default function App() {
 
   return (
     <Router>
-      <Suspense fallback={<RouteFallback />}>
-        <Routes>
+      <RouteChunkBoundary>
+        <Suspense fallback={<RouteFallback />}>
+          <Routes>
           <Route path="/debug" element={<DebugPage />} />
 
           <Route
@@ -114,6 +177,7 @@ export default function App() {
               path="/appointments"
               element={<AppointmentList profile={activeProfile} />}
             />
+            <Route path="/patient-booking" element={<PatientBookingArchitecture profile={activeProfile} />} />
             <Route path="/queue" element={<QueueManagement profile={activeProfile} />} />
             <Route path="/profile" element={<ProfilePage profile={activeProfile} />} />
           </Route>
@@ -147,8 +211,9 @@ export default function App() {
               )
             }
           />
-        </Routes>
-      </Suspense>
+          </Routes>
+        </Suspense>
+      </RouteChunkBoundary>
     </Router>
   );
 }

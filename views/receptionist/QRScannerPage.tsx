@@ -4,7 +4,6 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   Camera, 
   Search, 
-  X, 
   CheckCircle2, 
   AlertCircle,
   User,
@@ -12,17 +11,14 @@ import {
   Calendar,
   Phone,
   Activity,
-  Database,
-  RefreshCw,
-  VideoOff,
   Upload,
   Zap,
   ZapOff,
   ChevronDown,
   Info
 } from 'lucide-react';
-import { UserProfile, Appointment } from '../../types';
-import { approveCheckIn, getAppointmentByKeyFromRTDB } from '../../services/clinicService';
+import { UserProfile, Appointment } from '../../styles/types';
+import { approveCheckIn, getAppointmentByKeyFromRTDB, updateAppointmentPaymentStatus } from '../../services/clinicService';
 
 interface QRScannerPageProps {
   profile: UserProfile | null;
@@ -33,6 +29,79 @@ interface CameraDevice {
   label: string;
 }
 
+function getCameraStartErrorMessage(error: unknown) {
+  const cameraError = error as { name?: string; message?: string };
+  const errorName = cameraError?.name || '';
+  const errorMessage = cameraError?.message || '';
+
+  if (errorName === 'NotAllowedError' || errorName === 'PermissionDeniedError') {
+    return 'Camera access was blocked. Allow camera permission in your browser and reload the page.';
+  }
+
+  if (errorName === 'NotFoundError' || errorName === 'DevicesNotFoundError') {
+    return 'No camera was found on this device. Attach a camera or upload a QR image instead.';
+  }
+
+  if (errorName === 'NotReadableError' || errorName === 'TrackStartError') {
+    return 'The camera is already in use by another app. Close other camera apps and try again.';
+  }
+
+  if (errorName === 'OverconstrainedError' || errorMessage.includes('Overconstrained')) {
+    return 'The selected camera cannot be opened. Switch to another camera or use the default rear camera.';
+  }
+
+  if (errorName === 'SecurityError') {
+    return 'Camera access requires HTTPS or localhost. Open the app from a secure origin and try again.';
+  }
+
+  if (errorName === 'TypeError') {
+    return 'Camera access is not available in this browser. Try a modern browser with camera support.';
+  }
+
+  return errorMessage || 'Check hardware permissions and try again.';
+}
+
+function getBrowserCameraErrorMessage() {
+  if (typeof window === 'undefined') return '';
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return 'Camera access is not available in this browser. Try Chrome, Edge, or Safari.';
+  }
+
+  if (!window.isSecureContext) {
+    return 'Camera access requires HTTPS or localhost. Open the forwarded HTTPS preview or http://localhost, not 0.0.0.0.';
+  }
+
+  return '';
+}
+
+async function getCameraPermissionState() {
+  if (typeof navigator === 'undefined' || !navigator.permissions?.query) {
+    return 'unknown';
+  }
+
+  try {
+    const permissionStatus = await navigator.permissions.query({ name: 'camera' as PermissionName });
+    return permissionStatus.state;
+  } catch {
+    return 'unknown';
+  }
+}
+
+function isPermissionStyleCameraError(error: unknown) {
+  const cameraError = error as { name?: string; message?: string };
+  const errorName = cameraError?.name || '';
+  const errorMessage = cameraError?.message || '';
+
+  return (
+    errorName === 'NotAllowedError' ||
+    errorName === 'PermissionDeniedError' ||
+    errorName === 'SecurityError' ||
+    errorMessage.includes('permission') ||
+    errorMessage.includes('Permission')
+  );
+}
+
 export default function QRScannerPage({ profile }: QRScannerPageProps) {
   const [scanning, setScanning] = useState(false);
   const [isCameraReady, setIsCameraReady] = useState(false);
@@ -40,6 +109,8 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [manualId, setManualId] = useState('');
+  const [paymentEntry, setPaymentEntry] = useState('');
+  const [paymentMessage, setPaymentMessage] = useState<string | null>(null);
   const [dbStatus, setDbStatus] = useState<'checking' | 'connected' | 'error'>('checking');
   
   const [cameras, setCameras] = useState<CameraDevice[]>([]);
@@ -48,7 +119,58 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
   const [hasTorch, setHasTorch] = useState(false);
   
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
+  const cameraTransitionRef = useRef<Promise<void> | null>(null);
+  const isStartingRef = useRef(false);
+  const isStoppingRef = useRef(false);
+  const isScannerRunningRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const loadCameras = async () => {
+    try {
+      const devices = await Html5Qrcode.getCameras();
+      const nextCameras = (devices || []).map((device) => ({ id: device.id, label: device.label }));
+      setCameras(nextCameras);
+
+      if (!selectedCameraId && nextCameras.length > 0) {
+        const backCam = nextCameras.find((device) => {
+          const label = device.label.toLowerCase();
+          return label.includes('back') || label.includes('rear') || label.includes('environment');
+        });
+        setSelectedCameraId(backCam ? backCam.id : nextCameras[0].id);
+      }
+
+      return nextCameras;
+    } catch (cameraListError) {
+      if (!isPermissionStyleCameraError(cameraListError)) {
+        console.warn('Camera enumeration skipped:', cameraListError);
+      }
+      return [];
+    }
+  };
+
+  const ensureCameraAccess = async () => {
+    const browserCameraError = getBrowserCameraErrorMessage();
+    if (browserCameraError) {
+      throw new Error(browserCameraError);
+    }
+
+    const permissionState = await getCameraPermissionState();
+    if (permissionState === 'denied') {
+      throw new Error('Camera permission is blocked for this site. Click the camera icon in the address bar, allow camera access, then reload the page.');
+    }
+
+    const constraints: MediaStreamConstraints = {
+      video: selectedCameraId && selectedCameraId !== 'environment' && selectedCameraId !== 'user'
+        ? { deviceId: { exact: selectedCameraId } }
+        : selectedCameraId === 'user'
+          ? { facingMode: 'user' }
+          : { facingMode: { ideal: 'environment' } },
+      audio: false,
+    };
+
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    stream.getTracks().forEach((track) => track.stop());
+  };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -101,16 +223,52 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
     return { deviceId: { exact: selectedCameraId } };
   };
 
+  const getCameraStartCandidates = () => {
+    const candidates: Array<Record<string, unknown>> = [];
+    const seen = new Set<string>();
+
+    const addCandidate = (label: string, constraint: Record<string, unknown>) => {
+      if (seen.has(label)) return;
+      seen.add(label);
+      candidates.push(constraint);
+    };
+
+    addCandidate('selected', getCameraConfig());
+
+    if (selectedCameraId !== 'environment') {
+      addCandidate('environment', { facingMode: { ideal: 'environment' } });
+    }
+
+    if (selectedCameraId !== 'user') {
+      addCandidate('user', { facingMode: { ideal: 'user' } });
+    }
+
+    for (const camera of cameras) {
+      if (camera.id && camera.id !== selectedCameraId) {
+        addCandidate(`device:${camera.id}`, { deviceId: { exact: camera.id } });
+      }
+    }
+
+    return candidates;
+  };
+
   const startScanner = async () => {
+    if (isStartingRef.current || isStoppingRef.current || isScannerRunningRef.current) return;
+    if (cameraTransitionRef.current) return;
+    isStartingRef.current = true;
     setError(null);
     try {
+      await ensureCameraAccess();
+      await loadCameras();
+
       const readerEl = document.getElementById("reader");
       if (!readerEl) return;
 
+      // If a scanner exists and is running, stop it first (wait for stop)
       if (html5QrCodeRef.current) {
         try {
-          if (html5QrCodeRef.current.isScanning) {
-            await html5QrCodeRef.current.stop();
+          if (isScannerRunningRef.current || html5QrCodeRef.current.isScanning) {
+            await stopScanner();
           }
         } catch (e) {
           console.warn("Stop error before start", e);
@@ -126,34 +284,31 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
         formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ]
       };
 
-      const cameraId = getCameraConfig();
+      const startCandidates = getCameraStartCandidates();
+      let lastStartError: unknown = null;
 
-      try {
-        await html5QrCodeRef.current.start(cameraId as any, config, onScanSuccess, onScanFailure);
-      } catch (startError: any) {
-        // If a specific device cannot be opened, fall back to a generic rear-camera request.
-        if ((startError?.name === 'OverconstrainedError' || startError?.message?.includes('Overconstrained')) && selectedCameraId && selectedCameraId !== 'environment' && selectedCameraId !== 'user') {
-          await html5QrCodeRef.current.start({ facingMode: { ideal: 'environment' } } as any, config, onScanSuccess, onScanFailure);
-        } else {
-          throw startError;
+      for (const candidate of startCandidates) {
+        try {
+          await html5QrCodeRef.current.start(candidate as any, config, onScanSuccess, onScanFailure);
+          lastStartError = null;
+          break;
+        } catch (startError: any) {
+          lastStartError = startError;
+          if (isPermissionStyleCameraError(startError)) {
+            throw startError;
+          }
         }
+      }
+
+      if (lastStartError) {
+        throw lastStartError;
       }
       
       setScanning(true);
       setIsCameraReady(true);
+      isScannerRunningRef.current = true;
 
-      try {
-        const devices = await Html5Qrcode.getCameras();
-        if (devices && devices.length > 0) {
-          setCameras(devices.map(d => ({ id: d.id, label: d.label })));
-          const backCam = devices.find(d => d.label.toLowerCase().includes('back') || d.label.toLowerCase().includes('environment'));
-          if (!selectedCameraId) {
-            setSelectedCameraId(backCam ? backCam.id : devices[0].id);
-          }
-        }
-      } catch (cameraListError) {
-        console.warn('Camera enumeration skipped or denied:', cameraListError);
-      }
+      await loadCameras();
       
       // Check for torch capability
       try {
@@ -163,11 +318,34 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
         setHasTorch(false);
       }
     } catch (err: any) {
-      console.error("Camera start error:", err);
-      setError(`Camera Error: ${err.message || 'Check hardware permissions'}`);
+      if (!isPermissionStyleCameraError(err)) {
+        console.error("Camera start error:", err);
+      }
+      setError(`Camera Error: ${getCameraStartErrorMessage(err)}`);
       setScanning(false);
       setIsCameraReady(false);
+      isScannerRunningRef.current = false;
+    } finally {
+      isStartingRef.current = false;
     }
+  };
+
+  const restartScanner = async () => {
+    if (cameraTransitionRef.current) {
+      await cameraTransitionRef.current;
+    }
+
+    cameraTransitionRef.current = (async () => {
+      await stopScanner();
+    })();
+
+    try {
+      await cameraTransitionRef.current;
+    } finally {
+      cameraTransitionRef.current = null;
+    }
+
+    await startScanner();
   };
 
   const toggleTorch = async () => {
@@ -184,22 +362,31 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
   };
 
   const stopScanner = async () => {
-    if (html5QrCodeRef.current && html5QrCodeRef.current.isScanning) {
-      try {
-        await html5QrCodeRef.current.stop();
-        setScanning(false);
-        setIsCameraReady(false);
-        setTorchOn(false);
-      } catch (err) {
-        console.error("Failed to stop scanner", err);
-      }
+    if (isStoppingRef.current) return;
+    if (!html5QrCodeRef.current) return;
+
+    // If not running according to our ref and scanner reports not scanning, skip
+    if (!isScannerRunningRef.current && !html5QrCodeRef.current.isScanning) return;
+
+    isStoppingRef.current = true;
+    try {
+      await html5QrCodeRef.current.stop();
+      setScanning(false);
+      setIsCameraReady(false);
+      setTorchOn(false);
+      isScannerRunningRef.current = false;
+    } catch (err) {
+      console.error("Failed to stop scanner", err);
+    } finally {
+      isStoppingRef.current = false;
     }
   };
 
   useEffect(() => {
     return () => {
-      if (html5QrCodeRef.current && html5QrCodeRef.current.isScanning) {
-        html5QrCodeRef.current.stop().catch(console.error);
+      // Ensure scanner is stopped cleanly on unmount
+      if (html5QrCodeRef.current) {
+        stopScanner().catch(console.error);
       }
     };
   }, []);
@@ -263,10 +450,13 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
 
         if (currentStatus === 'confirmed') {
           setResult(appointment);
+          setPaymentEntry(appointment.paymentStatus || '');
         } else {
           // Auto-approve if it matches and we are a receptionist
           await approveCheckIn(profile.clinicId, appointment.id, appointment, profile.uid);
-          setResult({ ...appointment, status: 'confirmed' as any, qrVerified: true });
+          const confirmedAppointment = { ...appointment, status: 'confirmed' as any, qrVerified: true };
+          setResult(confirmedAppointment);
+          setPaymentEntry(confirmedAppointment.paymentStatus || 'paid');
         }
       } else {
         throw new Error("Appointment not found. Check the ID.");
@@ -301,127 +491,159 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
     setResult(null);
     setError(null);
     setManualId('');
-    startScanner();
+    setPaymentEntry('');
+    setPaymentMessage(null);
+    restartScanner();
   };
 
+  const handlePaymentEntryChange = async (value: string) => {
+    setPaymentEntry(value);
+    setPaymentMessage(null);
+
+    if (value.trim().toLowerCase() !== 'paid') return;
+    if (!result || !profile) return;
+    if ((result.paymentStatus || '').toLowerCase() === 'paid') {
+      setPaymentMessage('Payment already marked as paid.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await updateAppointmentPaymentStatus(profile.clinicId, result.id, result, 'paid');
+      setResult((previous) => previous ? { ...previous, paymentStatus: 'paid' } : previous);
+      setPaymentMessage('Payment updated to paid.');
+    } catch (err: any) {
+      setPaymentMessage(err.message || 'Payment update failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const statusLabel = scanning ? 'Live scanning' : loading ? 'Checking' : 'Scanner idle';
+  const statusColor = scanning ? 'bg-emerald-500' : loading ? 'bg-amber-500' : 'bg-slate-400';
+  const connectionLabel = dbStatus === 'connected' ? 'Connected' : dbStatus === 'checking' ? 'Checking' : 'Connection issue';
+
   return (
-    <div className="max-w-6xl mx-auto pb-20 mt-4 px-4">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-10">
-        <div>
-          <div className="flex items-center gap-3 mb-1">
-            <div className="h-10 w-10 rounded-xl bg-sky-600 flex items-center justify-center text-white shadow-lg shadow-sky-200">
+    <div className="mx-auto max-w-7xl px-4 pb-24 pt-4 sm:px-6 lg:px-8">
+      <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-4">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-sky-600 text-white shadow-sm">
               <Camera size={24} strokeWidth={2.5} />
             </div>
-            <h1 className="text-3xl font-black text-slate-900 tracking-tight">ScanApp</h1>
+            <div className="min-w-0">
+              <h1 className="text-2xl font-bold tracking-tight text-slate-950">ScanApp</h1>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-500">
+                <span>Cloud Health Verification System</span>
+                <span className="hidden h-1 w-1 rounded-full bg-slate-300 sm:inline-block" />
+                <span className="inline-flex items-center gap-1.5 font-medium text-slate-600">
+                  <span className={`h-2 w-2 rounded-full ${dbStatus === 'connected' ? 'bg-emerald-500' : dbStatus === 'checking' ? 'bg-amber-500' : 'bg-rose-500'}`} />
+                  {connectionLabel}
+                </span>
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <p className="text-slate-500 font-medium">Cloud Health Verification System</p>
-            <span className={`h-2 w-2 rounded-full ${dbStatus === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
-          </div>
-        </div>
 
-        <div className="flex flex-wrap items-center gap-3">
-          <input 
-            type="file" 
-            ref={fileInputRef}
-            onChange={handleFileUpload}
-            accept="image/*"
-            className="hidden"
-          />
-          <button 
-            onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-2 rounded-2xl bg-white border border-slate-200 px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 shadow-sm transition-all active:scale-95"
-          >
-            <Upload size={18} /> Upload Image
-          </button>
-          
-          <div className="relative group">
-            <select 
-              value={selectedCameraId || ''}
-              onChange={(e) => {
-                const newId = e.target.value;
-                setSelectedCameraId(newId);
-                // Restart scanner if it was running
-                if (html5QrCodeRef.current?.isScanning) {
-                  stopScanner().then(() => {
-                    // Small delay to let hardware release
-                    setTimeout(() => startScanner(), 300);
-                  });
-                }
-              }}
-              className="appearance-none rounded-2xl bg-white border border-slate-200 px-10 py-3 pr-10 text-sm font-bold text-slate-700 shadow-sm hover:bg-slate-50 transition-all cursor-pointer outline-none min-w-[200px]"
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center lg:justify-end">
+            <input 
+              type="file" 
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+              accept="image/*"
+              className="hidden"
+            />
+            <button 
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 active:scale-95"
             >
-              {cameras.length > 0 ? (
-                <>
-                  <option value="environment">Back Camera (Environment)</option>
-                  <option value="user">Front Camera (User)</option>
-                  <optgroup label="All Devices">
-                    {cameras.map(cam => (
-                      <option key={cam.id} value={cam.id}>{cam.label || `Camera ${cam.id.slice(0, 5)}`}</option>
-                    ))}
-                  </optgroup>
-                </>
-              ) : (
-                <>
-                  <option value="environment">Back Camera</option>
-                  <option value="user">Front Camera</option>
-                </>
-              )}
-            </select>
-            <Camera size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
-            <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              <Upload size={18} /> Upload Image
+            </button>
+            
+            <div className="relative">
+              <select 
+                value={selectedCameraId || ''}
+                onChange={(e) => {
+                  const newId = e.target.value;
+                  setSelectedCameraId(newId);
+                  // Restart scanner if it was running
+                  if (html5QrCodeRef.current?.isScanning) {
+                    void restartScanner();
+                  }
+                }}
+                className="w-full min-w-0 cursor-pointer appearance-none rounded-xl border border-slate-200 bg-white px-10 py-2.5 pr-10 text-sm font-semibold text-slate-700 shadow-sm outline-none transition hover:bg-slate-50 sm:min-w-[210px]"
+              >
+                {cameras.length > 0 ? (
+                  <>
+                    <option value="environment">Back Camera (Environment)</option>
+                    <option value="user">Front Camera (User)</option>
+                    <optgroup label="All Devices">
+                      {cameras.map(cam => (
+                        <option key={cam.id} value={cam.id}>{cam.label || `Camera ${cam.id.slice(0, 5)}`}</option>
+                      ))}
+                    </optgroup>
+                  </>
+                ) : (
+                  <>
+                    <option value="environment">Back Camera</option>
+                    <option value="user">Front Camera</option>
+                  </>
+                )}
+              </select>
+              <Camera size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+            </div>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-10 lg:grid-cols-12 items-start">
-        <div className="lg:col-span-12 xl:col-span-7 space-y-8">
-          <div className="relative group">
-            <div className={`relative overflow-hidden rounded-[40px] bg-slate-100 shadow-2xl transition-all duration-500 border-[8px] ${scanning ? 'border-sky-500/30' : 'border-slate-200'}`}>
-              
-              {scanning && (
-                <div className="absolute inset-0 z-10 pointer-events-none">
-                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-72 h-72">
-                    <div className="absolute top-0 left-0 w-20 h-20 border-t-8 border-l-8 border-sky-500 rounded-tl-3xl shadow-[0_0_15px_rgba(56,189,248,0.3)]"></div>
-                    <div className="absolute top-0 right-0 w-20 h-20 border-t-8 border-r-8 border-sky-500 rounded-tr-3xl shadow-[0_0_15px_rgba(56,189,248,0.3)]"></div>
-                    <div className="absolute bottom-0 left-0 w-20 h-20 border-b-8 border-l-8 border-sky-500 rounded-bl-3xl shadow-[0_0_15px_rgba(56,189,248,0.3)]"></div>
-                    <div className="absolute bottom-0 right-0 w-20 h-20 border-b-8 border-r-8 border-sky-500 rounded-br-3xl shadow-[0_0_15px_rgba(56,189,248,0.3)]"></div>
-                    <div className="absolute top-0 left-4 right-4 h-1 bg-sky-500 shadow-[0_0_20px_rgba(56,189,248,0.9)] animate-scan-line"></div>
-                  </div>
-                  <div className="absolute inset-0 bg-slate-900/20" style={{ clipPath: 'polygon(0% 0%, 0% 100%, 50% 100%, 50% 15%, 85% 15%, 85% 85%, 15% 85%, 15% 15%, 50% 15%, 50% 100%, 100% 100%, 100% 0%)' }}></div>
-                </div>
-              )}
+      <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-12">
+        <div className="space-y-5 lg:col-span-7">
+          <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+              <div className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-slate-700">
+                <span className={`h-2 w-2 rounded-full ${statusColor}`} />
+                {statusLabel}
+              </div>
 
-              <div id="reader" className="w-full h-[480px] object-cover bg-slate-50"></div>
-              
-              <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-4 z-20">
+              <div className="flex items-center gap-2">
                 {hasTorch && scanning && (
                   <button 
                     onClick={toggleTorch}
-                    className={`h-14 w-14 rounded-full flex items-center justify-center transition-all shadow-xl ${torchOn ? 'bg-yellow-400 text-black scale-110' : 'bg-white/40 text-slate-800 hover:bg-white/60 backdrop-blur-md border border-white/50'}`}
+                    className={`inline-flex h-10 w-10 items-center justify-center rounded-xl border transition active:scale-95 ${torchOn ? 'border-amber-300 bg-amber-300 text-slate-950' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}
+                    aria-label="Toggle flashlight"
+                    title="Toggle flashlight"
                   >
-                    {torchOn ? <Zap size={24} fill="currentColor" /> : <ZapOff size={24} />}
+                    {torchOn ? <Zap size={20} fill="currentColor" /> : <ZapOff size={20} />}
                   </button>
                 )}
-                
+
                 {!scanning && !result && (
                   <button 
                     onClick={startScanner}
-                    className="flex items-center gap-3 rounded-2xl bg-sky-600 px-10 py-4 font-bold text-white shadow-xl shadow-sky-200 hover:bg-sky-700 transition-all active:scale-95"
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-sky-700 active:scale-95"
                   >
-                    <Camera size={20} /> Start Scanner
+                    <Camera size={18} /> Start Scanner
                   </button>
                 )}
               </div>
+            </div>
 
-              <div className="absolute top-8 left-1/2 -translate-x-1/2 z-20">
-                <div className="flex items-center gap-2 rounded-full bg-white/60 backdrop-blur-md px-4 py-2 border border-white/20 shadow-sm">
-                  <div className={`h-2 w-2 rounded-full ${scanning ? 'bg-red-500 animate-pulse' : 'bg-slate-400'}`}></div>
-                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-800">
-                    {scanning ? 'Live Scanning' : 'Scanner Idle'}
-                  </span>
+            <div className={`relative overflow-hidden bg-slate-950 transition-all duration-300 ${scanning ? 'ring-2 ring-inset ring-sky-400/50' : ''}`}>
+              
+              {scanning && (
+                <div className="absolute inset-0 z-10 pointer-events-none">
+                  <div className="absolute left-1/2 top-1/2 h-56 w-56 -translate-x-1/2 -translate-y-1/2 sm:h-72 sm:w-72">
+                    <div className="absolute left-0 top-0 h-14 w-14 rounded-tl-2xl border-l-4 border-t-4 border-sky-400 sm:h-20 sm:w-20" />
+                    <div className="absolute right-0 top-0 h-14 w-14 rounded-tr-2xl border-r-4 border-t-4 border-sky-400 sm:h-20 sm:w-20" />
+                    <div className="absolute bottom-0 left-0 h-14 w-14 rounded-bl-2xl border-b-4 border-l-4 border-sky-400 sm:h-20 sm:w-20" />
+                    <div className="absolute bottom-0 right-0 h-14 w-14 rounded-br-2xl border-b-4 border-r-4 border-sky-400 sm:h-20 sm:w-20" />
+                    <div className="absolute left-4 right-4 top-0 h-0.5 bg-sky-300 shadow-[0_0_18px_rgba(125,211,252,0.9)] animate-scan-line" />
+                  </div>
+                  <div className="absolute inset-0 bg-slate-950/30" />
                 </div>
-              </div>
+              )}
+
+              <div id="reader" className="h-[clamp(320px,62vw,520px)] min-h-[320px] w-full bg-slate-100 object-cover" />
 
               <AnimatePresence>
                 {result && (
@@ -429,20 +651,20 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
-                    className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-white/95 backdrop-blur-xl p-12 text-center"
+                    className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-white/95 p-8 text-center backdrop-blur"
                   >
                     <motion.div 
                       initial={{ scale: 0.5 }}
                       animate={{ scale: 1 }}
-                      className="h-24 w-24 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 shadow-xl shadow-emerald-100/50 mb-6"
+                      className="mb-5 flex h-20 w-20 items-center justify-center rounded-full bg-emerald-100 text-emerald-600"
                     >
-                      <CheckCircle2 size={48} strokeWidth={2.5} />
+                      <CheckCircle2 size={42} strokeWidth={2.5} />
                     </motion.div>
-                    <h2 className="text-3xl font-black text-slate-900 mb-2">Patient Identified</h2>
-                    <p className="text-slate-500 font-medium mb-10 max-w-sm">Verification successful. Details have been loaded for your review.</p>
+                    <h2 className="text-2xl font-bold text-slate-950">Patient Identified</h2>
+                    <p className="mb-8 mt-2 max-w-sm text-sm text-slate-500">Verification successful. Details are ready for review.</p>
                     <button 
                       onClick={reset}
-                      className="rounded-2xl border border-slate-200 bg-white px-8 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 transition-all active:scale-95 shadow-sm"
+                      className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50 active:scale-95"
                     >
                       Scan Next Card
                     </button>
@@ -450,43 +672,43 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
                 )}
               </AnimatePresence>
             </div>
+          </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-10">
-              <div className="space-y-4">
-                <div className="flex items-center gap-2 text-slate-400 px-1">
-                  <Search size={16} />
-                  <span className="text-xs font-black uppercase tracking-widest">Manual Input</span>
-                </div>
-                <form onSubmit={handleManualSearch} className="relative flex gap-2">
-                  <input 
-                    type="text" 
-                    placeholder="Enter Card ID or Key..." 
-                    className="flex-1 rounded-[24px] border border-slate-200 bg-white px-6 py-4 text-sm font-bold outline-none focus:ring-4 focus:ring-sky-100 transition-all placeholder:text-slate-300"
-                    value={manualId}
-                    onChange={(e) => setManualId(e.target.value)}
-                  />
-                  <button className="rounded-[20px] bg-slate-900 px-6 text-white transition-all hover:bg-black active:scale-95 shadow-xl shadow-slate-200">
-                    <Search size={22} />
-                  </button>
-                </form>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="mb-3 flex items-center gap-2 text-slate-500">
+                <Search size={16} />
+                <span className="text-xs font-bold uppercase tracking-wide">Manual Input</span>
               </div>
+              <form onSubmit={handleManualSearch} className="flex gap-2">
+                <input 
+                  type="text" 
+                  placeholder="Enter Card ID or Key..." 
+                  className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold outline-none transition placeholder:text-slate-400 focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
+                  value={manualId}
+                  onChange={(e) => setManualId(e.target.value)}
+                />
+                <button className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-slate-950 text-white shadow-sm transition hover:bg-slate-800 active:scale-95" aria-label="Search appointment">
+                  <Search size={20} />
+                </button>
+              </form>
+            </div>
 
-              <div className="rounded-[32px] bg-slate-50 p-6 border border-slate-200 flex gap-4">
-                <div className="h-10 w-10 shrink-0 rounded-xl bg-white border border-slate-200 flex items-center justify-center text-slate-400">
+            <div className="flex gap-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500">
                   <Info size={20} />
                 </div>
                 <div>
-                  <p className="text-xs font-black text-slate-900 uppercase mb-1">Quick Tip</p>
-                  <p className="text-xs text-slate-500 font-medium leading-relaxed">
+                  <p className="mb-1 text-xs font-bold uppercase tracking-wide text-slate-900">Quick Tip</p>
+                  <p className="text-sm font-medium leading-relaxed text-slate-500">
                     Center the QR code in the guide box for instant detection. Ensure good lighting for best results.
                   </p>
                 </div>
               </div>
             </div>
           </div>
-        </div>
 
-        <div className="lg:col-span-12 xl:col-span-5">
+        <div className="lg:col-span-5">
           <AnimatePresence mode="wait">
             {result ? (
               <motion.div 
@@ -494,74 +716,97 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.95 }}
-                className="rounded-[40px] bg-white border border-slate-200 shadow-2xl p-10 flex flex-col h-fit sticky top-10"
+                className="flex h-fit flex-col rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:sticky lg:top-6"
               >
-                <div className="flex items-center justify-between mb-10">
-                  <span className={`rounded-full px-4 py-1.5 text-[10px] font-black uppercase tracking-widest shadow-sm border ${
+                <div className="mb-6 flex items-center justify-between gap-3">
+                  <span className={`rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-wide ${
                     result.status === 'confirmed' ? 'bg-[#D1FAE5] border-emerald-300 text-emerald-800' : 'bg-sky-50 border-sky-200 text-sky-700'
                   }`}>
                     {result.status.replace('_', ' ')}
                   </span>
-                  <p className="text-[10px] font-mono font-bold text-slate-300 tracking-tighter">REF: {result.id.slice(0, 12)}</p>
+                  <p className="truncate text-xs font-mono font-bold text-slate-400">REF: {result.id.slice(0, 12)}</p>
                 </div>
 
-                <div className="space-y-8">
+                <div className="space-y-6">
                   <div className="flex items-start gap-5">
-                    <div className="h-16 w-16 rounded-[24px] bg-sky-50 flex items-center justify-center text-sky-600 shadow-inner">
-                      <User size={32} strokeWidth={2} />
+                    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-sky-50 text-sky-600">
+                      <User size={28} strokeWidth={2} />
                     </div>
                     <div>
-                      <p className="text-[10px] font-black uppercase text-slate-400 tracking-widest mb-1">Patient Name</p>
-                      <h3 className="text-2xl font-black text-slate-900 leading-tight">{result.patientName}</h3>
-                      <p className="text-slate-500 font-bold mt-1">{result.patientPhone}</p>
+                      <p className="mb-1 text-xs font-bold uppercase tracking-wide text-slate-400">Patient Name</p>
+                      <h3 className="text-2xl font-bold leading-tight text-slate-950">{result.patientName}</h3>
+                      <p className="mt-1 flex items-center gap-2 text-sm font-semibold text-slate-500">
+                        <Phone size={14} />
+                        {result.patientPhone || 'No phone on file'}
+                      </p>
                     </div>
                   </div>
 
-                  <div className="h-px bg-gradient-to-r from-transparent via-slate-100 to-transparent"></div>
+                  <div className="h-px bg-slate-100" />
 
-                  <div className="grid grid-cols-2 gap-8">
-                    <div className="space-y-1">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                       <div className="flex items-center gap-2 text-slate-400">
                         <Calendar size={14} />
-                        <span className="text-[10px] font-black uppercase tracking-widest">Date</span>
+                        <span className="text-xs font-bold uppercase tracking-wide">Date</span>
                       </div>
-                      <p className="text-lg font-black text-slate-900 tracking-tight">{result.date}</p>
+                      <p className="mt-2 text-base font-bold tracking-tight text-slate-950">{result.date}</p>
                     </div>
-                    <div className="space-y-1">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                       <div className="flex items-center gap-2 text-slate-400">
                         <Clock size={14} />
-                        <span className="text-[10px] font-black uppercase tracking-widest">Slot</span>
+                        <span className="text-xs font-bold uppercase tracking-wide">Slot</span>
                       </div>
-                      <p className="text-lg font-black text-slate-900 tracking-tight">{result.slotStartTime}</p>
+                      <p className="mt-2 text-base font-bold tracking-tight text-slate-950">{result.slotStartTime}</p>
                     </div>
                   </div>
 
-                  <div className="rounded-[32px] bg-sky-50 p-6 flex items-center gap-4 border border-sky-100">
-                    <div className="h-12 w-12 rounded-2xl bg-white flex items-center justify-center text-sky-600 shadow-sm">
+                  <div className="flex items-center gap-4 rounded-xl border border-sky-100 bg-sky-50 p-4">
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-white text-sky-600 shadow-sm">
                       <Activity size={24} />
                     </div>
                     <div>
-                      <p className="text-[10px] font-black uppercase text-sky-600 tracking-widest mb-1">Doctor Assigned</p>
-                      <p className="text-slate-900 font-black text-lg">Dr. {result.doctorName}</p>
+                      <p className="mb-1 text-xs font-bold uppercase tracking-wide text-sky-600">Doctor Assigned</p>
+                      <p className="text-lg font-bold text-slate-950">Dr. {result.doctorName}</p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <label htmlFor="payment-entry" className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-400">
+                      Payment Field
+                    </label>
+                    <input
+                      id="payment-entry"
+                      type="text"
+                      value={paymentEntry}
+                      onChange={(event) => handlePaymentEntryChange(event.target.value)}
+                      placeholder="Write paid"
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold outline-none transition placeholder:text-slate-400 focus:border-sky-300 focus:ring-4 focus:ring-sky-100"
+                    />
+                    <div className="mt-2 flex items-center justify-between gap-3">
+                      <p className="text-xs font-semibold text-slate-500">
+                        Current: <span className="capitalize text-slate-800">{result.paymentStatus || 'pending'}</span>
+                      </p>
+                      {paymentMessage ? <p className="text-xs font-semibold text-emerald-600">{paymentMessage}</p> : null}
                     </div>
                   </div>
                 </div>
 
                 {result.status === 'confirmed' ? (
-                  <div className="mt-12 group">
-                    <div className="rounded-[28px] bg-emerald-50 border border-emerald-200 p-6 text-center shadow-sm transition-all group-hover:scale-[1.02]">
-                      <div className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500 text-white mb-3 shadow-md">
+                  <div className="mt-8">
+                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-center">
+                      <div className="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500 text-white">
                         <CheckCircle2 size={28} strokeWidth={3} />
                       </div>
-                      <p className="text-emerald-900 font-black text-lg uppercase tracking-tight">Verified & Approved</p>
-                      <p className="text-emerald-600 text-xs font-bold mt-1">Patient marked as present</p>
+                      <p className="text-lg font-bold text-emerald-900">Verified & Approved</p>
+                      <p className="mt-1 text-sm font-semibold text-emerald-600">Patient marked as present</p>
                     </div>
                   </div>
                 ) : (
                   <button
                     onClick={handleApprove}
                     disabled={loading}
-                    className="mt-12 w-full rounded-[28px] bg-sky-600 py-6 text-lg font-black text-white shadow-2xl shadow-sky-200 hover:bg-sky-700 transition-all active:scale-95 disabled:opacity-50"
+                    className="mt-8 w-full rounded-xl bg-sky-600 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-sky-700 active:scale-95 disabled:opacity-50"
                   >
                     {loading ? "Verifying..." : "Approve Attendance"}
                   </button>
@@ -569,7 +814,7 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
                 
                 <button 
                   onClick={reset}
-                  className="mt-4 w-full py-4 text-xs font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 transition-colors"
+                  className="mt-3 w-full py-3 text-xs font-bold uppercase tracking-wide text-slate-400 transition-colors hover:text-slate-600"
                 >
                   Cancel & Rescan
                 </button>
@@ -579,13 +824,13 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
                 key="empty-state"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="rounded-[40px] border-4 border-dashed border-slate-200 bg-white p-16 text-center flex flex-col items-center sticky top-10"
+                className="flex flex-col items-center rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center shadow-sm lg:sticky lg:top-6"
               >
-                <div className="h-24 w-24 rounded-full bg-slate-50 flex items-center justify-center text-slate-200 mb-8 border border-slate-100">
-                  <Search size={48} strokeWidth={1} />
+                <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl border border-slate-100 bg-slate-50 text-slate-300">
+                  <Search size={40} strokeWidth={1.5} />
                 </div>
-                <h3 className="text-2xl font-black text-slate-900 mb-3 tracking-tight">Awaiting Scan</h3>
-                <p className="text-slate-400 text-sm font-medium leading-relaxed max-w-[240px]">
+                <h3 className="mb-2 text-xl font-bold tracking-tight text-slate-950">Awaiting Scan</h3>
+                <p className="max-w-[260px] text-sm font-medium leading-relaxed text-slate-500">
                   Point your camera at a patient's clinic card or upload a captured image to view details.
                 </p>
                 
@@ -593,10 +838,10 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
                   <motion.div 
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="mt-10 rounded-2xl bg-red-50 p-4 border border-red-100 flex items-center gap-3 text-left"
+                    className="mt-6 flex items-center gap-3 rounded-xl border border-rose-100 bg-rose-50 p-4 text-left"
                   >
-                    <AlertCircle size={20} className="text-red-500 shrink-0" />
-                    <p className="text-xs font-bold text-red-700">{error}</p>
+                    <AlertCircle size={20} className="shrink-0 text-rose-500" />
+                    <p className="text-sm font-semibold text-rose-700">{error}</p>
                   </motion.div>
                 )}
               </motion.div>
@@ -618,16 +863,5 @@ export default function QRScannerPage({ profile }: QRScannerPageProps) {
         }
       `}} />
     </div>
-  );
-}
-
-function QrCodeAlt({ size }: { size: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
-      <rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" />
-      <rect x="7" y="7" width=".01" height=".01" /><rect x="17" y="7" width=".01" height=".01" />
-      <rect x="17" y="17" width=".01" height=".01" /><rect x="7" y="17" width=".01" height=".01" />
-    </svg>
   );
 }

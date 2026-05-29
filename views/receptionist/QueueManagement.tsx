@@ -10,7 +10,7 @@ import {
   Stethoscope,
   Users,
 } from 'lucide-react';
-import { UserProfile, Appointment, AppointmentStatus, DoctorProfile } from '../../types';
+import { UserProfile, Appointment, AppointmentStatus, DoctorProfile } from '../../styles/types';
 import { listenToClinicPatientQueue, updateAppointmentStatus, getReceptionistProfile, getAssignedDoctors, fetchClinicPatientQueue } from '../../services/clinicService';
 import { formatDistanceToNowStrict } from 'date-fns';
 
